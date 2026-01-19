@@ -19,7 +19,7 @@ from validator.tournament.utils import get_real_tournament_winner
 
 def calculate_scaled_weights(
     tournament_audit_data: TournamentAuditData,
-) -> tuple[float, float, float, float, float, str | None, str | None]:
+) -> tuple[float, float, float, float, float, float, float, str | None, str | None, str | None]:
     """
     Calculate scaled weights and winner hotkeys from tournament audit data.
     Uses the same logic as get_node_weights_from_tournament_audit_data in weight_setting.py.
@@ -27,7 +27,8 @@ def calculate_scaled_weights(
     Returns:
         Tuple of (scaled_text_tournament_weight, scaled_text_base_weight,
                  scaled_image_tournament_weight, scaled_image_base_weight,
-                 scaled_burn_weight, text_winner_hotkey, image_winner_hotkey)
+                 scaled_environment_tournament_weight, scaled_environment_base_weight,
+                 scaled_burn_weight, text_winner_hotkey, image_winner_hotkey, environment_winner_hotkey)
     """
     participants: list[str] = tournament_audit_data.participants
     participation_total: float = len(participants) * cts.TOURNAMENT_PARTICIPATION_WEIGHT
@@ -35,22 +36,28 @@ def calculate_scaled_weights(
 
     scaled_text_tournament_weight: float = tournament_audit_data.text_tournament_weight * scale_factor
     scaled_image_tournament_weight: float = tournament_audit_data.image_tournament_weight * scale_factor
+    scaled_environment_tournament_weight: float = tournament_audit_data.environment_tournament_weight * scale_factor
     scaled_burn_weight: float = tournament_audit_data.burn_weight * scale_factor
 
     scaled_text_base_weight: float = cts.TOURNAMENT_TEXT_WEIGHT * scale_factor
     scaled_image_base_weight: float = cts.TOURNAMENT_IMAGE_WEIGHT * scale_factor
+    scaled_environment_base_weight: float = cts.TOURNAMENT_ENVIRONMENT_WEIGHT * scale_factor
 
     text_winner_hotkey = get_real_tournament_winner(tournament_audit_data.text_tournament_data)
     image_winner_hotkey = get_real_tournament_winner(tournament_audit_data.image_tournament_data)
+    environment_winner_hotkey = get_real_tournament_winner(tournament_audit_data.environment_tournament_data)
 
     return (
         scaled_text_tournament_weight,
         scaled_text_base_weight,
         scaled_image_tournament_weight,
         scaled_image_base_weight,
+        scaled_environment_tournament_weight,
+        scaled_environment_base_weight,
         scaled_burn_weight,
         text_winner_hotkey,
         image_winner_hotkey,
+        environment_winner_hotkey,
     )
 
 

@@ -36,6 +36,7 @@ class RoundType(str, Enum):
 class TournamentType(str, Enum):
     TEXT = "text"
     IMAGE = "image"
+    ENVIRONMENT = "environment"
 
 
 class GpuRequirement(str, Enum):
@@ -269,9 +270,11 @@ class TournamentDetailsResponse(BaseModel):
 class TournamentAuditData(BaseModel):
     text_tournament_data: TournamentResultsWithWinners | None = None
     image_tournament_data: TournamentResultsWithWinners | None = None
+    environment_tournament_data: TournamentResultsWithWinners | None = None
     participants: list[str] = []
     text_tournament_weight: float = 0.0
     image_tournament_weight: float = 0.0
+    environment_tournament_weight: float = 0.0
     burn_weight: float = 0.0
     weekly_participation: list["HotkeyTaskParticipation"] = []
 
@@ -306,14 +309,20 @@ class NextTournamentInfo(BaseModel):
     tournament_type: TournamentType
     next_start_date: datetime | None = None
     next_end_date: datetime | None = None
-    interval_hours: int | None = None
     current_round_number: int | None = None
     tournament_status: str | None = None
+    # Legacy fields for frontend compatibility
+    interval_hours: int | None = None
+    # New scheduling fields
+    scheduled_day_of_week: int | None = None  # 0=Monday, 6=Sunday
+    scheduled_hour: int | None = None  # 0-23 UTC
+    scheduled_minute: int | None = None  # Always 0
 
 
 class NextTournamentDates(BaseModel):
     text: NextTournamentInfo
     image: NextTournamentInfo
+    environment: NextTournamentInfo
 
 
 class ActiveTournamentParticipant(BaseModel):
@@ -331,6 +340,7 @@ class ActiveTournamentInfo(BaseModel):
 class ActiveTournamentsResponse(BaseModel):
     text: ActiveTournamentInfo | None
     image: ActiveTournamentInfo | None
+    environment: ActiveTournamentInfo | None
 
 
 class TournamentBurnData(BaseModel):
@@ -338,10 +348,13 @@ class TournamentBurnData(BaseModel):
 
     text_performance_diff: float | None
     image_performance_diff: float | None
+    environment_performance_diff: float | None = None
     text_burn_proportion: float
     image_burn_proportion: float
+    environment_burn_proportion: float = 0.0
     text_tournament_weight: float
     image_tournament_weight: float
+    environment_tournament_weight: float = 0.0
     burn_weight: float
 
 
@@ -350,6 +363,7 @@ class LatestTournamentsDetailsResponse(BaseModel):
 
     text: TournamentDetailsResponse | None
     image: TournamentDetailsResponse | None
+    environment: TournamentDetailsResponse | None = None
     burn_data: TournamentBurnData
 
 
@@ -446,6 +460,7 @@ class NodeWeightsResult(BaseModel):
         """Convert to tuple format for compatibility with existing code"""
         return self.node_ids, self.node_weights
 
+
 class MinerEmissionWeight(BaseModel):
     hotkey: str
     rank: int
@@ -456,6 +471,7 @@ class TournamentWeightsResponse(BaseModel):
     burn_data: TournamentBurnData
     text_top_miners: list[MinerEmissionWeight]
     image_top_miners: list[MinerEmissionWeight]
+    environment_top_miners: list[MinerEmissionWeight] = []
 
 
 class WeightProjection(BaseModel):
@@ -475,6 +491,7 @@ class WeightProjectionResponse(BaseModel):
     percentage_improvement: float
     text_projection: TournamentProjection
     image_projection: TournamentProjection
+    environment_projection: TournamentProjection | None = None
 
 
 class MultiWeightProjectionResponse(BaseModel):
@@ -483,8 +500,10 @@ class MultiWeightProjectionResponse(BaseModel):
 
 class BossBattleResponse(BaseModel):
     """Response for boss battle performance differences"""
-    
+
     text_tournament_id: str | None
     text_performance_differences: list[TaskPerformanceDifference]
     image_tournament_id: str | None
     image_performance_differences: list[TaskPerformanceDifference]
+    environment_tournament_id: str | None = None
+    environment_performance_differences: list[TaskPerformanceDifference] = []

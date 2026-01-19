@@ -18,7 +18,14 @@ def calculate_tournament_type_scores_from_data(
     if not tournament_data:
         return TournamentTypeResult(scores=[], prev_winner_hotkey=None, prev_winner_won_final=False)
 
-    type_weight = cts.TOURNAMENT_TEXT_WEIGHT if tournament_type == TournamentType.TEXT else cts.TOURNAMENT_IMAGE_WEIGHT
+    if tournament_type == TournamentType.TEXT:
+        type_weight = cts.TOURNAMENT_TEXT_WEIGHT
+    elif tournament_type == TournamentType.IMAGE:
+        type_weight = cts.TOURNAMENT_IMAGE_WEIGHT
+    elif tournament_type == TournamentType.ENVIRONMENT:
+        type_weight = cts.TOURNAMENT_ENVIRONMENT_WEIGHT
+    else:
+        raise ValueError(f"Unknown tournament type: {tournament_type}")
     score_dict = {}
     prev_winner_won_final = False
 
@@ -41,15 +48,36 @@ def calculate_tournament_type_scores_from_data(
             if is_final_round and winner == cts.EMISSION_BURN_HOTKEY and tournament_data.base_winner_hotkey:
                 prev_winner_won_final = True
 
-            # Exclude both the actual winner and EMISSION_BURN_HOTKEY (if it's the placeholder) from earning points
-            if (
-                winner
-                and winner != actual_winner_hotkey
-                and not (winner == cts.EMISSION_BURN_HOTKEY and tournament_data.base_winner_hotkey)
-            ):
-                if winner not in score_dict:
-                    score_dict[winner] = 0
-                score_dict[winner] += round_number * type_weight
+            if tournament_type == TournamentType.ENVIRONMENT:
+                ranked_participants = []
+                for participant in task.participant_scores:
+                    hotkey = participant.get("hotkey")
+                    quality_score = participant.get("quality_score")
+                    if hotkey == actual_winner_hotkey:
+                        continue
+                    if hotkey == cts.EMISSION_BURN_HOTKEY and tournament_data.base_winner_hotkey:
+                        continue
+                    ranked_participants.append((hotkey, quality_score))
+
+                ranked_participants.sort(key=lambda x: x[1], reverse=True)
+
+                total_participants = len(ranked_participants)
+                for rank, (hotkey, _) in enumerate(ranked_participants, start=1):
+                    points = round_number * type_weight * (total_participants - rank + 1) / total_participants
+                    if hotkey not in score_dict:
+                        score_dict[hotkey] = 0
+                    score_dict[hotkey] += points
+
+            else:
+                # Exclude both the actual winner and EMISSION_BURN_HOTKEY (if it's the placeholder) from earning points
+                if (
+                    winner
+                    and winner != actual_winner_hotkey
+                    and not (winner == cts.EMISSION_BURN_HOTKEY and tournament_data.base_winner_hotkey)
+                ):
+                    if winner not in score_dict:
+                        score_dict[winner] = 0
+                    score_dict[winner] += round_number * type_weight
 
     scores = [TournamentScore(hotkey=hotkey, score=score) for hotkey, score in score_dict.items()]
 
@@ -145,8 +173,9 @@ def tournament_scores_to_weights(
 def get_tournament_weights_from_data(
     text_tournament_data: TournamentResultsWithWinners | None,
     image_tournament_data: TournamentResultsWithWinners | None,
-) -> tuple[dict[str, float], dict[str, float]]:
-    """Get tournament weights keeping text and image tournaments separate."""
+    environment_tournament_data: TournamentResultsWithWinners | None = None,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Get tournament weights keeping text, image, and environment tournaments separate."""
 
     # Calculate text tournament weights
     text_result = calculate_tournament_type_scores_from_data(TournamentType.TEXT, text_tournament_data)
@@ -166,4 +195,13 @@ def get_tournament_weights_from_data(
         )
     logger.info(f"Image tournament weights: {image_weights}")
 
-    return text_weights, image_weights
+    # Calculate environment tournament weights
+    environment_result = calculate_tournament_type_scores_from_data(TournamentType.ENVIRONMENT, environment_tournament_data)
+    environment_weights = {}
+    if environment_result.scores:
+        environment_weights = tournament_scores_to_weights(
+            environment_result.scores, environment_result.prev_winner_hotkey, environment_result.prev_winner_won_final
+        )
+    logger.info(f"Environment tournament weights: {environment_weights}")
+
+    return text_weights, image_weights, environment_weights

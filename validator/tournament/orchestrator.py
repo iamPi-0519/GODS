@@ -297,6 +297,8 @@ async def _process_tasks_for_training(tasks: list[AnyTypeRawTask], config: Confi
                 tournament_type = TournamentType.TEXT
             elif task.task_type == TaskType.IMAGETASK:
                 tournament_type = TournamentType.IMAGE
+            elif task.task_type == TaskType.ENVIRONMENTTASK:
+                tournament_type = TournamentType.ENVIRONMENT
             else:
                 tournament_type = None
 
