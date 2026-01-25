@@ -15,21 +15,21 @@ output_dir: miner_id_24
 rl: grpo
 vllm:
   tensor_parallel_size: 1
-  gpu_memory_utilization: 0.15
-  max_model_len: 24000
+  gpu_memory_utilization: 0.3
+  max_model_len: 4096
   enable_prefix_caching: False
 trl:
   beta: 0.01
-  max_completion_length: 256
+  max_completion_length: 512
   temperature: 0.7
   use_vllm: true
   vllm_mode: colocate
   vllm_enable_sleep_mode: false
-  num_generations: 4
+  num_generations: 8
   rollout_func:
 
 eval_strategy: "no"
-sequence_len: 24000
+sequence_len: 4096
 sample_packing: false
 pad_to_sequence_len: true
 trust_remote_code: true
@@ -42,11 +42,11 @@ lora_dropout: 0.0
 lora_target_linear: true
 lora_fan_in_fan_out:
 
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 8
 micro_batch_size: 4
 optimizer: adamw_bnb_8bit
 lr_scheduler: cosine
-learning_rate: 5e-6
+learning_rate: 2.5e-5
 max_grad_norm: 1.0
 
 train_on_inputs: false
@@ -55,7 +55,7 @@ bf16: auto
 fp16:
 tf32: false
 
-gradient_checkpointing: false
+gradient_checkpointing: true
 early_stopping_patience:
 resume_from_checkpoint:
 local_rank:
@@ -67,7 +67,7 @@ s2_attention:
 use_wandb: true
 wandb_project: Gradients-Rollout
 wandb_entity:
-wandb_mode:
+wandb_mode: online
 wandb_run: Gradients-Rollout
 wandb_runid: default
 

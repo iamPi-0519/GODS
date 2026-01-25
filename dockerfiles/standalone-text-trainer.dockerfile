@@ -19,7 +19,7 @@ WORKDIR /workspace/axolotl
 RUN mkdir -p /workspace/axolotl/configs \
     /workspace/axolotl/outputs \
     /workspace/axolotl/data \
-    /workspace/input_data 
+    /workspace/input_data
 
 COPY dockerfiles/patches/axolotl_grpo_rollout_fix.py /workspace/axolotl/src/axolotl/core/trainers/grpo/__init__.py
 COPY dockerfiles/environment_functions/ /workspace/axolotl/src
@@ -30,6 +30,7 @@ COPY scripts /workspace/scripts
 COPY core/config/base.yml /workspace/axolotl/base.yml
 COPY core/config/base_grpo.yml /workspace/axolotl/base_grpo.yml
 COPY core/config/base_environment.yml /workspace/axolotl/base_environment.yml
+COPY core/config/accelerate_config.yaml /workspace/accelerate_config.yaml
 
 RUN chmod +x /workspace/scripts/run_text_trainer.sh /workspace/scripts/text_trainer.py
 

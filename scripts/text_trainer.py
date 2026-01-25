@@ -151,7 +151,12 @@ def run_training(config_path):
     training_env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     training_env["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
-    training_command = ["accelerate", "launch", "-m", "axolotl.cli.train", config_path]
+    training_command = [
+        "accelerate", "launch",
+        "--config_file", "/workspace/accelerate_config.yaml",
+        "-m", "axolotl.cli.train",
+        config_path
+    ]
 
     try:
         print("Starting training subprocess...\n", flush=True)
