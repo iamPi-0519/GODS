@@ -6,14 +6,16 @@ ENV UV_SYSTEM_PYTHON=1 \
 
 # Core deps
 RUN uv pip install packaging setuptools wheel awscli pydantic \
-      mlflow huggingface_hub aiohttp requests toml fastapi \
+      "protobuf>=3.20.0,<4.0.0" \
+      "mlflow>=2.8.0,<7.0.0" \
+      huggingface_hub aiohttp requests toml fastapi \
       uvicorn httpx loguru python-dotenv scipy numpy datasets \
       tenacity minio pandas tiktoken sentencepiece peft Pillow \
       PyYAML textstat langcheck detoxify \
       git+https://github.com/rayonlabs/fiber@2.4.0 \
-      git+https://github.com/huggingface/trl@07b4a84e0a3c8f37a2508fe177615af019782946
+      git+https://github.com/huggingface/trl@40dc4bd993f699c8c36a5bc0cf31511b8866aadf
 
-RUN uv pip install --no-build-isolation vllm==0.10.2
+RUN uv pip install --no-build-isolation vllm==0.12.0
 
 WORKDIR /workspace/axolotl
 RUN mkdir -p /workspace/axolotl/configs \
