@@ -123,8 +123,8 @@ class GRPOStrategy:
         if trl.epsilon_high is not None:
             grpo_args_kwargs["epsilon_high"] = trl.epsilon_high
 
-        if trl.use_liger_loss is not None:
-            grpo_args_kwargs["use_liger_loss"] = trl.use_liger_loss
+        if trl.use_liger_kernel is not None:
+            grpo_args_kwargs["use_liger_kernel"] = trl.use_liger_kernel
 
         return grpo_args_kwargs
 

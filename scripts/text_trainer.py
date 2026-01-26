@@ -149,6 +149,7 @@ def run_training(config_path):
     training_env = os.environ.copy()
     training_env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     training_env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    training_env["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
     training_command = [
         "accelerate", "launch",

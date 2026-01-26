@@ -16,8 +16,8 @@ rl: grpo
 vllm:
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.3
-  max_model_len: 4096
-  enable_prefix_caching: False
+  max_model_len: 2560
+  enable_prefix_caching: true
 trl:
   beta: 0.01
   max_completion_length: 512
@@ -26,10 +26,11 @@ trl:
   vllm_mode: colocate
   vllm_enable_sleep_mode: false
   num_generations: 8
+  use_liger_kernel: true
   rollout_func:
 
 eval_strategy: "no"
-sequence_len: 4096
+sequence_len: 2560
 sample_packing: false
 pad_to_sequence_len: true
 trust_remote_code: true
@@ -72,7 +73,7 @@ wandb_run: Gradients-Rollout
 wandb_runid: default
 
 eval_table_size:
-max_steps: 1000
+max_steps: 150
 save_steps: 20
 debug:
 deepspeed:
