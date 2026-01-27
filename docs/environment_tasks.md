@@ -38,7 +38,7 @@ Miners must implement a custom **Rollout Function** associated with the `dataset
 > **Optimizing for GRPO Grouping:** Understanding how GRPO groups trajectories is critical for policy stability. Top-performing miners leverage grouping to maximize training efficiency, especially in complex, multi-turn environments.
 
 > [!IMPORTANT]
-> **Supported Environments:** Currently, `alfworld` is the sole supported environment. Support for additional environments will be phased in shortly.
+> **Supported Environments:** The currently supported environment for the tournament is the [Affine GAME Environment](https://github.com/AffineFoundation/affinetes/tree/main/environments/openspiel). Specifically, the Goofspiel Game (Task IDs 0-99999999).
 
 
 ### 3. Configuration
@@ -48,7 +48,7 @@ Declare your Rollout Function within your **Axolotl config** or to your trainer 
 **Example Reward Function:**
 
 ```python
-def alfworld_rollout_reward_func(completions, **kwargs):
+def rollout_reward_func(completions, **kwargs):
     rewards = kwargs.get("env_rewards") if kwargs else None
     return [float(r) for r in rewards] if rewards is not None else [0.0] * len(completions)
 ```
@@ -76,11 +76,27 @@ The default miner implementation leaves plenty of room for optimizations and is 
 * **Better Multi-GPU:** To use rollout functions TRL requires the use of VLLM for model inference during training. Improving how the training script uses VLLM (colocate, running VLLM server on only a single gpu and the rest for training, etc) can greatly improve efficiency.
 
 
+## Rules
+
+Code submissions to the environment tournaments must adhere to the following rules. Submissions will be checked for compliance. Any winner of the tournament that breaks one of the following rules may have their win revoked. These rules may be changed in the future.
+
+1. You may not bring your own dataset in the docker image.
+
+2. You may not bring a pretrained model in the docker image.
+
+3. You may not do any SFT for environment tasks.
+
+We have these rules to ensure that the winner is competing in the intended spirit of the tournament: to create training scripts that use live interactions with an environment to train a model.
+
+As always we are open to a continual conversation with our community about these rules and how to ensure the tournaments are fair. We will make a public announcement any time we have to enact these rules and strip a winner of their title.
+
+
 ## Technical References
 
 | Resource | Description |
 | --- | --- |
 | **[Affinetes](https://github.com/AffineFoundation/affinetes)** | The standard protocol for Gradients environment server communication. |
+| **[Affine GAME Environment](https://github.com/AffineFoundation/affinetes/tree/main/environments/openspiel)** | The currently used environment server miners are given access to during training. |
 | **[OpenEnv Rollout Functions](https://huggingface.co/docs/trl/main/en/openenv)** | TRL's official guide on implementing custom rollout logic. |
 
 ---
