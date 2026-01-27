@@ -2,51 +2,110 @@ import docker
 import time
 import requests
 import random
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from huggingface_hub import snapshot_download
 
-# --- Configuration ---
+# --- Model Configuration ---
 BASE_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
-LORA_MODEL_NAME = None # Place the name of your HuggingFace repo with the trained LORA here.
-VLLM_IMAGE = "vllm/vllm-openai:latest"
-AGENTGYM_IMAGE = "affinefoundation/agentgym:alfworld"
-NETWORK_NAME = "agent_eval_net"
+BASE_MODEL_REVISION = None
+LORA_MODEL_NAME = None # Put the name of your repo containing the LORA here
+LORA_MODEL_REVISION = None
 
-# Evaluation Params
-NUM_EVALS = 500
-DATA_LEN_RANGE = 2500
+
+# --- Evaluation Configuration ---
+GAME_TO_EVAL = "goofspiel"
+OPPONENT_TYPE = "mcts"
+NUM_EVALS = 100
 TEMPERATURE = 0.0
 RANDOM_SEED = 42
+NUM_CONCURRENT_EVAL_WORKERS = 5
+
+
+##############################################################################################
 
 
 client = docker.from_env()
 
-def run_random_eval_suite():
+GAMES_TO_TASK_ID_RANGE = {
+    "goofspiel": (0, 99999999),
+    "liars_dice": (100000000, 199999999),
+    "leduc_poker": (200000000, 299999999),
+    "gin_rummy": (300000000, 399999999),
+    "othello": (400000000, 499999999),
+    "backgammon": (500000000, 599999999),
+    "hex": (600000000, 699999999),
+    "clobber": (700000000, 799999999),
+}
+SGLANG_IMAGE = "lmsysorg/sglang:latest"
+AGENTGYM_IMAGE = "diagonalge/openspiel:latest"
+NETWORK_NAME = "agent_eval_net"
+SGLANG_PORT = 30000
+HF_CACHE_DIR = "/mnt/hf_cache"
+task_id_range = GAMES_TO_TASK_ID_RANGE[GAME_TO_EVAL]
+task_id_min, task_id_max = task_id_range
+DATA_LEN_RANGE = task_id_max
+
+def run_evaluation():
     containers = {}
-    all_results = []
+    avg_score = 0.0
 
     try:
         # 1. Infrastructure Setup
         networks = client.networks.list(names=[NETWORK_NAME])
         if not networks: client.networks.create(NETWORK_NAME, driver="bridge")
 
+        lora_dir = None
         if LORA_MODEL_NAME:
-            print(f"🚀 Starting vLLM: {BASE_MODEL_NAME} w/ lora {LORA_MODEL_NAME}")
-            vllm_command = f"--model {BASE_MODEL_NAME} --enable-lora --lora-modules trained_lora={LORA_MODEL_NAME} --port 8000 --trust-remote-code"
-
+            print(f"🚀 Starting SGLang: {BASE_MODEL_NAME} w/ lora {LORA_MODEL_NAME}")
+            safe_lora_name = LORA_MODEL_NAME.replace("/", "_")
+            lora_dir = f"/tmp/sglang_lora/{safe_lora_name}"
+            print(f"⬇️  Downloading LoRA to {lora_dir}...")
+            snapshot_download(
+                repo_id=LORA_MODEL_NAME,
+                revision=LORA_MODEL_REVISION,
+                local_dir=lora_dir,
+                local_dir_use_symlinks=False,
+            )
+            sglang_command = (
+                f"python3 -m sglang.launch_server --model-path {BASE_MODEL_NAME} "
+                "--enable-lora --lora-paths trained_lora=/lora/trained_lora "
+                "--lora-backend triton "
+                "--host 0.0.0.0 --port 30000 --tensor-parallel-size 1 --dtype float16 --enable-deterministic-inference "
+                f"--random-seed {RANDOM_SEED}"
+            )
         else:
-            print(f"🚀 Starting vLLM: {BASE_MODEL_NAME}")
-            vllm_command = f"--model {BASE_MODEL_NAME} --port 8000 --trust-remote-code"
+            print(f"🚀 Starting SGLang: {BASE_MODEL_NAME}")
+            sglang_command = (
+                f"python3 -m sglang.launch_server --model-path {BASE_MODEL_NAME} "
+                f"{'--revision ' + BASE_MODEL_REVISION if BASE_MODEL_REVISION else ''} "
+                "--host 0.0.0.0 --port 30000 --tensor-parallel-size 1 --dtype float16 --enable-deterministic-inference "
+                f"--random-seed {RANDOM_SEED}"
+            )
 
-        vllm = client.containers.run(
-            VLLM_IMAGE,
-            command=vllm_command,
-            name="vllm-server",
+        sglang = client.containers.run(
+            SGLANG_IMAGE,
+            command=sglang_command,
+            name="sglang-server",
             detach=True,
             network=NETWORK_NAME,
-            ports={'8000/tcp': 8000},
+            ports={f"{SGLANG_PORT}/tcp": SGLANG_PORT},
             device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])],
+            environment={
+                "HF_HOME": "/hf",
+                "TRANSFORMERS_CACHE": "/hf",
+                "HUGGINGFACE_HUB_CACHE": "/hf",
+                "HF_HUB_ENABLE_HF_TRANSFER": "1",
+                "PYTHONHASHSEED": str(RANDOM_SEED),
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                "NVIDIA_TF32_OVERRIDE": "0",
+            },
+            volumes={
+                HF_CACHE_DIR: {"bind": "/hf", "mode": "rw"},
+                **({lora_dir: {"bind": "/lora/trained_lora", "mode": "ro"}} if lora_dir else {}),
+            },
+            ipc_mode="host",
         )
-        containers['vllm'] = vllm
+        containers['sglang'] = sglang
 
         print("🚀 Starting AgentGym Server...")
         agent = client.containers.run(
@@ -59,91 +118,67 @@ def run_random_eval_suite():
         containers['agent'] = agent
 
         # 2. Wait for Readiness
-        print("⏳ Waiting for vLLM health check...")
+        print("⏳ Waiting for SGLang health check...")
         while True:
             try:
-                if requests.get("http://localhost:8000/v1/models", timeout=2).status_code == 200:
+                if requests.get(f"http://localhost:{SGLANG_PORT}/v1/models", timeout=2).status_code == 200:
                     break
             except:
                 time.sleep(5)
-        print("✅ vLLM Ready.\n")
+        print("✅ SGLang Ready.\n")
 
         # 3. Evaluation Loop
         random.seed(RANDOM_SEED)
         eval_list = random.sample(range(1, DATA_LEN_RANGE + 1), NUM_EVALS)
         total_score = 0.0
-        total_time = 0.0
 
         if LORA_MODEL_NAME:
-            inference_model_name = "trained_lora"
+            # For OpenAI-compatible API, use base-model:adapter-name format per SGLang docs
+            # Format: model_path:adapter_name (e.g., "Qwen/Qwen2.5-3B-Instruct:trained_lora")
+            inference_model_name = f"{BASE_MODEL_NAME}:trained_lora"
         else:
             inference_model_name = BASE_MODEL_NAME
 
-        for i, task_id in enumerate(eval_list):
-            print(f"🔄 [{i+1}/{NUM_EVALS}] Task ID: {task_id}...", end="", flush=True)
-
+        def evaluate_task(task_id):
             payload = {
                 "model": inference_model_name,
-                "base_url": "http://vllm-server:8000/v1",
+                "base_url": f"http://sglang-server:{SGLANG_PORT}/v1",
                 "task_id": task_id,
                 "temperature": TEMPERATURE,
-                "max_round": 30
+                "seed": RANDOM_SEED,
+                "opponent": OPPONENT_TYPE,
+                "api_key": "test"
             }
-
             try:
-                start_ts = time.time()
                 response = requests.post("http://localhost:8001/evaluate", json=payload, timeout=2500)
                 result = response.json()
-
-                latency = result.get('time_taken', time.time() - start_ts)
-                score = result.get('score', 0.0)
-
-                total_score += score
-                total_time += latency
-
-                all_results.append({
-                    "task_id": task_id,
-                    "task_name": result.get('task_name', 'unknown'),
-                    "score": score,
-                    "success": result.get('success', False),
-                    "time": latency,
-                    "error": result.get('error')
-                })
-                print(f" Done (Score: {score})")
+                result_payload = result.get("result") if isinstance(result, dict) else None
+                if isinstance(result_payload, dict):
+                    data = result_payload
+                else:
+                    data = result if isinstance(result, dict) else {}
+                return task_id, data.get('score', 0.0), None
             except Exception as e:
-                print(f" Failed: {e}")
+                return task_id, 0.0, str(e)
 
-        # 4. Final Aggregation & File Writing
-        avg_score = total_score / len(all_results) if all_results else 0
-        avg_time = total_time / len(all_results) if all_results else 0
+        print(f"Running {NUM_EVALS} evaluations with concurrency={NUM_CONCURRENT_EVAL_WORKERS}...")
+        completed = 0
+        with ThreadPoolExecutor(max_workers=NUM_CONCURRENT_EVAL_WORKERS) as executor:
+            futures = {executor.submit(evaluate_task, task_id): task_id for task_id in eval_list}
+            for future in as_completed(futures):
+                task_id, score, error = future.result()
+                completed += 1
+                total_score += score
+                if error:
+                    print(f"[{completed}/{NUM_EVALS}] Task {task_id}: FAILED ({error})")
+                else:
+                    print(f"[{completed}/{NUM_EVALS}] Task {task_id}: {score}")
 
+        # 4. Final Score
+        avg_score = total_score / NUM_EVALS if NUM_EVALS > 0 else 0
 
-        safe_model_name = BASE_MODEL_NAME.split("/")[1]
-
-        if LORA_MODEL_NAME:
-            safe_lora_name = LORA_MODEL_NAME.split("/")[1]
-            filename = f"eval_results_{safe_model_name}_{safe_lora_name}.txt"
-        else:
-            filename = f"eval_results_{safe_model_name}.txt"
-
-        with open(filename, "w") as f:
-            f.write("="*40 + "\n")
-            f.write(f"EVALUATION REPORT - {datetime.now()}\n")
-            f.write(f"Model: {BASE_MODEL_NAME}\n")
-            f.write("="*40 + "\n\n")
-            f.write(f"SUMMARY STATS:\n")
-            f.write(f"- Total Tasks: {len(all_results)}\n")
-            f.write(f"- Average Score: {avg_score:.4f}\n")
-            f.write(f"- Average Time Per Episode: {avg_time:.2f}s\n\n")
-            f.write("DETAILED RESULTS:\n")
-            f.write(f"{'Task ID':<10} | {'Name':<15} | {'Score':<7} | {'Success':<8} | {'Time':<7}\n")
-            f.write("-" * 60 + "\n")
-            for res in all_results:
-                f.write(f"{res['task_id']:<10} | {res['task_name']:<15} | {res['score']:<7} | {str(res['success']):<8} | {res['time']:<7.2f}s\n")
-                if res['error']:
-                    f.write(f"   └─ Error: {res['error']}\n")
-
-        print(f"\n✅ Evaluation complete. Results saved to: {filename}")
+        print(f"\n✅ Evaluation complete.")
+        print(f"Score: {total_score}/{NUM_EVALS} ({avg_score:.4f})")
 
     finally:
         print("🧹 Cleaning up containers...")
@@ -151,5 +186,6 @@ def run_random_eval_suite():
             try: c.remove(force=True)
             except: pass
 
+
 if __name__ == "__main__":
-    run_random_eval_suite()
+    run_evaluation()
