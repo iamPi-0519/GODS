@@ -4,7 +4,7 @@ TASK_ID="1"
 MODEL="Qwen/Qwen2.5-3B-Instruct"
 DATASET="https://huggingface.co/datasets/TuringEnterprises/Turing-Open-Reasoning/resolve/main/Computational_STEM_QA_Dataset.json?download=true"
 DATASET_TYPE='{
-  "environment_name": "alfworld"
+  "environment_name": "game"
 }'
 FILE_FORMAT="s3"
 HOURS_TO_COMPLETE=12
@@ -19,10 +19,27 @@ DOCKER_BUILDKIT=1
 
 CHECKPOINTS_DIR="$(pwd)/secure_checkpoints"
 OUTPUTS_DIR="$(pwd)/outputs"
+DEBUG_DIR="$(pwd)/game_debug"
 mkdir -p "$CHECKPOINTS_DIR"
 chmod 777 "$CHECKPOINTS_DIR"
 mkdir -p "$OUTPUTS_DIR"
 chmod 777 "$OUTPUTS_DIR"
+mkdir -p "$DEBUG_DIR"
+chmod 777 "$DEBUG_DIR"
+
+docker network create -d bridge train-environment-network
+
+docker run -d \
+  --name environment-server-0 \
+  --network train-environment-network \
+  -p 10000:8000 \
+  diagonalge/openspiel:latest
+
+docker run -d \
+  --name environment-server-1 \
+  --network train-environment-network \
+  -p 10001:8000 \
+  diagonalge/openspiel:latest
 
 # Build the downloader image
 docker build -t trainer-downloader -f dockerfiles/trainer-downloader.dockerfile .
@@ -44,12 +61,22 @@ docker run --rm \
 
 
 docker run --rm --gpus all \
+  --network train-environment-network \
   --security-opt=no-new-privileges \
   --cap-drop=ALL \
   --memory=64g \
   --cpus=8 \
+  -e WANDB_API_KEY="$WANDB_TOKEN" \
+  -e WANDB_TOKEN="$WANDB_TOKEN" \
+  -e HUGGINGFACE_TOKEN="$HUGGINGFACE_TOKEN" \
+  -e HUGGINGFACE_USERNAME="$HUGGINGFACE_USERNAME" \
+  -e WANDB_MODE="online" \
+  -e AFFINE_GAME_LOG_PATH="/workspace/axolotl/game_debug/affine_game_model_outputs.log" \
+  -e ENVIRONMENT_SERVER_URLS="http://environment-server-0:8000,http://environment-server-1:8000" \
+  -e PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
   --volume "$CHECKPOINTS_DIR:/cache:rw" \
   --volume "$OUTPUTS_DIR:/app/checkpoints/:rw" \
+  --volume "$DEBUG_DIR:/workspace/axolotl/game_debug:rw" \
   --name grpo-text-trainer-example \
   standalone-text-trainer \
   --task-id "$TASK_ID" \
