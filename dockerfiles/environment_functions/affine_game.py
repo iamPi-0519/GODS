@@ -5,39 +5,22 @@ Your two options are 'random' and 'mcts'.
 Miners are free to choose which opponent type they train against. 
 """
 
-GOOFSPIEL_FORMAT_INSTRUCTIONS = """You are playing Goofspiel (also known as the Game of Pure Strategy), a simultaneous-choice card game against an opponent.
+GOOFSPIEL_FORMAT_INSTRUCTIONS = """
+You are Player 0 in Goofspiel.
 
-Game Rules:
-- You and your opponent each have cards numbered 1 through N (typically 13)
-- A point card is revealed each turn, worth its face value in points
-- Both players simultaneously choose one of their remaining cards to bid on the point card
-- The player who plays the higher card wins the points
-- If both players play the same card, the points are split
-- Once a card is played, it cannot be used again
-- The player with the most points at the end wins
+Decision rule (STRICT):
+- Read the line that starts with "Current point card:" to find the point card value, call it P.
+- Check if card P is in your hand (look for "P0 hand: ..." and verify P appears in that list).
+- If card P is in your hand, you MUST bid card P.
+- Action IDs are 0-indexed: card value 1 -> action ID 0, card value 2 -> action ID 1, card value 3 -> action ID 2, etc.
+- Therefore, to bid card P, output action ID = P - 1.
 
-Strategic Considerations:
-- Consider the value of the current point card
-- Think about which cards your opponent has already used
-- Balance between winning high-value point cards and saving strong cards for later
-- Your opponent is using MCTS (Monte Carlo Tree Search), so expect strategic play
+Output format (STRICT):
+- Reply with ONLY the action ID as a single integer (no other text, labels, or numbers).
+- Example: If point card is 3 and card 3 is in your hand, output "2" (because 3 - 1 = 2).
+- Example: If point card is 11 and card 11 is in your hand, output "10" (because 11 - 1 = 10).
+""".strip()
 
-Response Format:
-When responding, you should first reason about your strategy, then select your action.
-Your output must follow this format strictly:
-
-Thought:
-[Your strategic reasoning here - consider the point card value, remaining cards, opponent's likely strategy]
-
-Action:
-[A single number representing the card you want to play]
-
-Example:
-Thought:
-The point card is worth 10 points, which is high value. I still have my 13, 12, and 11 cards. My opponent has used their 13 already. I should play my 12 to secure these points since I'm likely to win.
-
-Action:
-12"""
 
 def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: int = 30) -> dict[str, list]:
     from trl.experimental.openenv import generate_rollout_completions
@@ -45,6 +28,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     import random
     import requests
     import json
+    import re
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # --- Constants for context length management ---
@@ -116,6 +100,8 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     current_observations = ["" for _ in range(num_episodes)]
     done_flags = [False for _ in range(num_episodes)]
     train_rewards = [0.0 for _ in range(num_episodes)]
+    episode_total_rewards = [0.0 for _ in range(num_episodes)]
+    episode_lengths = [0 for _ in range(num_episodes)]
     
     # Multi-step accumulator variables (accumulate across all turns)
     accumulated_messages = [[] for _ in range(num_episodes)]
@@ -220,19 +206,72 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 if prev_full_ids[i] is not None:
                     prev_full_ids[i] = prev_full_ids[i] + completion_ids
 
-            # --- Parse Action ---
-            action_to_send = completion_text
-            if action_to_send.endswith("</s>"):
-                action_to_send = action_to_send[:-5]
-
-            # Parse ReAct format
-            if "Action:" in action_to_send:
-                action_to_send = action_to_send.split("Action:")[-1].strip()
+            # --- Parse Action: first integer in the answer ---
+            text = completion_text.strip()
+            if text.endswith("</s>"):
+                text = text[:-5].strip()
+            match = re.search(r"\d+", text)
+            action_to_send = match.group(0) if match else text
             
-            episode_data.append((i, completion_text, action_to_send))
+            # Keep track of observation used to choose this action for optional reward shaping
+            obs_before = current_observations[i]
+
+            # --- Debug logging: write model output and parsed action to file ---
+            try:
+                log_path = os.environ.get("AFFINE_GAME_LOG_PATH", "affine_game_model_outputs.log")
+
+                # Try to infer the "correct" reference action from the observation, for easier debugging
+                reference_action = None
+                point_card = None
+                point_match = re.search(r"Current point card:\s*(\d+)", obs_before)
+                if point_match:
+                    point_card = point_match.group(1)
+                    point_card_int = int(point_card)
+                    
+                    # First, try to find Legal Actions block (for error prompts)
+                    legal_section = obs_before
+                    legal_start = obs_before.find("Legal Actions:")
+                    if legal_start != -1:
+                        legal_section = obs_before[legal_start:]
+                        choice_idx = legal_section.find("Your choice")
+                        if choice_idx != -1:
+                            legal_section = legal_section[:choice_idx]
+                        ref_pattern = rf"(\d+)\s*->\s*\[P0\]Bid:\s*{point_card}\b"
+                        ref_match = re.search(ref_pattern, legal_section)
+                        if ref_match:
+                            reference_action = ref_match.group(1)
+                    else:
+                        # No Legal Actions block - compute from point card value directly
+                        # Check if the point card is in P0's hand
+                        p0_hand_match = re.search(r"P0 hand:\s*([^\n]+)", obs_before)
+                        if p0_hand_match:
+                            p0_hand_str = p0_hand_match.group(1)
+                            # Check if point_card value is in the hand
+                            hand_numbers = re.findall(r'\b\d+\b', p0_hand_str)
+                            if point_card in hand_numbers:
+                                # Action IDs are 0-indexed: card value 1 -> action 0, card value 2 -> action 1, etc.
+                                reference_action = str(point_card_int - 1)
+
+                log_record = {
+                    "turn": int(turn),
+                    "episode_index": int(i),
+                    "action_to_send": action_to_send,
+                    "reference_action": reference_action,
+                    "point_card": point_card,
+                    "completion_text": completion_text,
+                    # Full observation text used to choose this action
+                    "obs_before": obs_before,
+                }
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_record) + "\n")
+            except Exception as e:
+                # Best-effort logging; never break training because of logging issues
+                print(f"[Affine GAME] Failed to log model output for episode {i}, turn {turn}: {e}")
+
+            episode_data.append((i, completion_text, action_to_send, obs_before))
         
         # --- Step Environments (Parallel) ---
-        def step_episode(i, completion_text, action_to_send):
+        def step_episode(i, completion_text, action_to_send, obs_before):
             try:
                 step_payload = {"action": action_to_send, "episode_id": episode_ids[i]}
                 step_res = requests.post(f"{env_endpoint}/step", json=step_payload, timeout=TIMEOUT)
@@ -243,25 +282,82 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 # Extract response data
                 step_state = step_block.get("observation", "")
                 step_reward = step_block.get("reward", 0)
+                
+                # Multiply base environment reward by 10x
+                shaped_reward = step_reward * 10.0
+                try:
+                    reference_action = None
+                    # 1) Parse current point card from the observation text
+                    point_match = re.search(r"Current point card:\s*(\d+)", obs_before)
+                    if point_match:
+                        point_card = point_match.group(1)
+                        point_card_int = int(point_card)
+                        
+                        # 2) First, try to find Legal Actions block (for error prompts from AgentGym)
+                        legal_section = obs_before
+                        legal_start = obs_before.find("Legal Actions:")
+                        if legal_start != -1:
+                            legal_section = obs_before[legal_start:]
+                            choice_idx = legal_section.find("Your choice")
+                            if choice_idx != -1:
+                                legal_section = legal_section[:choice_idx]
+                            # From legal actions, find the action id whose meaning is: "[P0]Bid: <point_card>"
+                            ref_pattern = rf"(\d+)\s*->\s*\[P0\]Bid:\s*{point_card}\b"
+                            ref_match = re.search(ref_pattern, legal_section)
+                            if ref_match:
+                                reference_action = ref_match.group(1)
+                        else:
+                            # No Legal Actions block - compute from point card value directly
+                            # Check if the point card is in P0's hand
+                            p0_hand_match = re.search(r"P0 hand:\s*([^\n]+)", obs_before)
+                            if p0_hand_match:
+                                p0_hand_str = p0_hand_match.group(1)
+                                # Check if point_card value is in the hand
+                                hand_numbers = re.findall(r'\b\d+\b', p0_hand_str)
+                                if point_card in hand_numbers:
+                                    # Action IDs are 0-indexed: card value 1 -> action 0, card value 2 -> action 1, etc.
+                                    reference_action = str(point_card_int - 1)
+
+                    # 3) If model's action matches this reference action id, add bonus.
+                    if (
+                        reference_action is not None
+                        and isinstance(action_to_send, str)
+                        and action_to_send.isdigit()
+                        and action_to_send == reference_action
+                    ):
+                        shaped_reward += 1.0
+                except Exception:
+                    print(f"Warning: Failed to compute shaped reward for episode {i}")
+                    shaped_reward = step_reward * 10.0
+                
                 step_done = step_block.get("done", False)
                 
-                return i, completion_text, step_state, step_reward, step_done, None
+                return i, completion_text, step_state, shaped_reward, step_done, None
             except Exception as e:
                 print(f"Step failed for episode {i}: {e}")
                 return i, completion_text, "", -0.01, True, e
         
         # Execute steps in parallel
         with ThreadPoolExecutor(max_workers=min(len(episode_data), 10)) as executor:
-            futures = [executor.submit(step_episode, i, comp_text, action) 
-                      for i, comp_text, action in episode_data]
+            futures = [executor.submit(step_episode, i, comp_text, action, obs_before) 
+                      for i, comp_text, action, obs_before in episode_data]
             for future in as_completed(futures):
                 i, completion_text, step_state, step_reward, step_done, error = future.result()
                 
                 current_observations[i] = step_state
                 done_flags[i] = step_done
-                
+
+                # Accumulate per-step rewards so we can compute a total over the whole episode.
+                episode_total_rewards[i] += step_reward
+                episode_lengths[i] += 1
+
+                # When an episode finishes, store its total shaped reward in train_rewards.
                 if step_done:
-                    train_rewards[i] = step_reward
+                    if episode_lengths[i] > 0:
+                        train_rewards[i] = episode_total_rewards[i]
+                    else:
+                        # Fallback: if somehow length is zero, just use the last step reward
+                        train_rewards[i] = step_reward
 
                 # Update messages for next turn
                 assistant_msg = {"role": "assistant", "content": completion_text}
