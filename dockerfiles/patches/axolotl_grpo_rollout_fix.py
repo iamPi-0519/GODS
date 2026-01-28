@@ -2,6 +2,7 @@
 
 import importlib
 import inspect
+import math
 import os
 from typing import Any
 
@@ -36,7 +37,38 @@ LOG = get_logger(__name__)
 
 
 class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
-    """GRPO trainer that applies an action mask to loss/IS/metrics."""
+    """GRPO trainer that applies an action mask to loss/IS/metrics and adds entropy regularization."""
+
+    def __init__(self, *args, **kwargs):
+        """
+        Extend the base GRPO trainer with optional entropy regularization.
+        """
+        super().__init__(*args, **kwargs)
+
+        # Defaults (no entropy regularization)
+        default_start = float(os.environ.get("GRPO_ENTROPY_COEF_START", "0.0"))
+        default_end = float(os.environ.get("GRPO_ENTROPY_COEF_END", "0.0"))
+        default_steps = int(os.environ.get("GRPO_ENTROPY_DECAY_STEPS", "0"))
+
+        self.initial_entropy_coef: float = getattr(self.args, "entropy_coef_start", default_start)
+        self.final_entropy_coef: float = getattr(self.args, "entropy_coef_end", default_end)
+        self.entropy_decay_steps: int = int(getattr(self.args, "entropy_decay_steps", default_steps))
+
+    def _get_entropy_coef(self) -> float:
+        """
+        Linearly decay entropy coefficient from initial_entropy_coef to final_entropy_coef
+        over entropy_decay_steps using trainer state.global_step when available.
+        """
+        if self.initial_entropy_coef == self.final_entropy_coef:
+            return float(self.initial_entropy_coef)
+
+        if self.entropy_decay_steps <= 0:
+            # No decay schedule defined; use initial coefficient
+            return float(self.initial_entropy_coef)
+
+        step = getattr(getattr(self, "state", None), "global_step", 0) or 0
+        t = min(step, self.entropy_decay_steps) / float(self.entropy_decay_steps)
+        return float(self.initial_entropy_coef + t * (self.final_entropy_coef - self.initial_entropy_coef))
 
     def _generate_and_score_completions(self, inputs: list[dict[str, torch.Tensor | Any]]) -> dict[str, Any]:
         if getattr(self, "rollout_func", None) is None:
@@ -569,6 +601,10 @@ class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
         if self.beta != 0.0:
             per_token_loss = per_token_loss + self.beta * per_token_kl
 
+        entropy_coef = self._get_entropy_coef()
+        if entropy_coef != 0.0:
+            per_token_loss = per_token_loss - entropy_coef * entropies
+
         if self.loss_type in ["grpo", "sapo"]:
             loss = ((per_token_loss * mask).sum(-1) / mask.sum(-1).clamp(min=1.0)).mean()
             loss = loss / self.current_gradient_accumulation_steps
@@ -600,7 +636,12 @@ class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
             self._metrics[mode]["kl"].append(self.accelerator.gather(mean_kl).nanmean().item())
 
         mean_entropy = masked_batch_mean(entropies)
-        self._metrics[mode]["entropy"].append(self.accelerator.gather(mean_entropy).nanmean().item())
+        gathered_mean_entropy = self.accelerator.gather(mean_entropy).nanmean().item()
+        self._metrics[mode]["entropy"].append(gathered_mean_entropy)
+
+        # Log the (possibly decayed) entropy coefficient used for this step
+        entropy_coef = self._get_entropy_coef()
+        self._metrics[mode]["entropy_coef"].append(entropy_coef)
 
         if self.loss_type in ["grpo", "bnpo", "dr_grpo", "dapo"]:
             # Compute the clipped probability ratios
