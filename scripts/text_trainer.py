@@ -92,7 +92,7 @@ def create_config(task_id, model, dataset, dataset_type, file_format, output_dir
     if log_wandb:
         config["wandb_runid"] = f"{task_id}_{expected_repo_name}"
         config["wandb_name"] = f"{task_id}_{expected_repo_name}"
-        config["wandb_mode"] = "offline"
+        config["wandb_mode"] = "online"
         os.makedirs(train_cst.WANDB_LOGS_DIR, exist_ok=True)
     else:
         for key in list(config.keys()):
