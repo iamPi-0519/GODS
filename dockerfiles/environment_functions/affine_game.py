@@ -5,21 +5,30 @@ Your two options are 'random' and 'mcts'.
 Miners are free to choose which opponent type they train against. 
 """
 
-GOOFSPIEL_FORMAT_INSTRUCTIONS = """
-You are Player 0 in Goofspiel.
+GOOFSPIEL_SYSTEM_PROMPT = '''You are playing goofspiel.
 
-Decision rule (STRICT):
-- Read the line that starts with "Current point card:" to find the point card value, call it P.
-- Check if card P is in your hand (look for "P0 hand: ..." and verify P appears in that list).
-- If card P is in your hand, you MUST bid card P.
-- Action IDs are 0-indexed: card value 1 -> action ID 0, card value 2 -> action ID 1, card value 3 -> action ID 2, etc.
-- Therefore, to bid card P, output action ID = P - 1.
+# Game Rules
+GOOFSPIEL RULES:
+Setup: Each player has bid cards numbered 1 to N. A prize deck with cards 1 to N is shuffled.
+Goal: Win the most points by bidding on prize cards.
 
-Output format (STRICT):
-- Reply with ONLY the action ID as a single integer (no other text, labels, or numbers).
-- Example: If point card is 3 and card 3 is in your hand, output "2" (because 3 - 1 = 2).
-- Example: If point card is 11 and card 11 is in your hand, output "10" (because 11 - 1 = 10).
-""".strip()
+Each turn:
+1. Reveal top prize card (worth its face value in points)
+2. Players simultaneously play one bid card from their hand
+3. Highest bidder wins the prize card (adds its value to score)
+4. If bids tie, prize card is discarded (no one gets points)
+
+Winning: Player with most points after all rounds wins.
+
+
+# Output Format
+You must respond with ONLY the action ID (a single number).
+Do NOT include descriptions or explanations.
+
+Examples:
+- For action "0 -> roll": respond "0"
+- For action "89 -> a3": respond "89"
+'''.strip()
 
 
 def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: int = 30) -> dict[str, list]:
@@ -47,7 +56,59 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     }
 
     selected_game = "goofspiel"
-    
+
+    # --- Helper: normalize Goofspiel observation and add Legal Actions ---
+    def format_goofspiel_observation(raw_obs: str) -> str:
+        """
+        Parse the raw Goofspiel observation from the environment and return a
+        normalized format that also includes a Legal Actions block for P0.
+        If parsing fails, fall back to the original observation.
+        """
+        try:
+            point_match = re.search(r"Current point card:\s*(\d+)", raw_obs)
+            remaining_match = re.search(r"Remaining Point Cards:\s*([^\n]+)", raw_obs)
+            p0_hand_match = re.search(r"P0 hand:\s*([^\n]+)", raw_obs)
+            p1_hand_match = re.search(r"P1 hand:\s*([^\n]+)", raw_obs)
+            win_seq_comment_match = re.search(r"\(Win sequence:[^\n]*\)", raw_obs)
+            score_match = re.search(r"Player 0:\s*[^,\n]+,\s*Player 1:\s*[^\n]+", raw_obs)
+            you_are_match = re.search(r"You are Player 0\.", raw_obs)
+
+            if not (point_match and remaining_match and p0_hand_match and p1_hand_match and score_match and win_seq_comment_match):
+                return raw_obs
+
+            point_card = point_match.group(1).strip()
+            remaining_cards = remaining_match.group(1).strip()
+            p0_hand_str = p0_hand_match.group(1).strip()
+            p1_hand_str = p1_hand_match.group(1).strip()
+            win_seq_comment = win_seq_comment_match.group(0).strip()
+            score_line = score_match.group(0).strip()
+            you_are_line = you_are_match.group(0).strip() if you_are_match else "You are Player 0."
+
+            # Build Legal Actions from P0 hand.
+            p0_cards = [int(x) for x in re.findall(r"\d+", p0_hand_str)]
+            p0_cards = sorted(set(p0_cards))
+            legal_lines = [f"{card - 1} -> [P0]Bid: {card}" for card in p0_cards]
+
+            lines = [
+                f"Current point card: {point_card}",
+                f"Remaining Point Cards: {remaining_cards}",
+                f"P0 hand: {p0_hand_str}",
+                f"P1 hand: {p1_hand_str}",
+                "Win sequence:",
+                win_seq_comment,
+                score_line,
+                "",
+                "",
+                you_are_line,
+                "Legal Actions:",
+                *legal_lines,
+                "\nYour choice (ID only):"
+            ]
+            return "\n".join(lines)
+        except Exception:
+            # Never break training due to formatting issues
+            return raw_obs
+
     # --- 1. Static Initialization (Once per Rank) ---
     # We check if the function has already established a connection for this worker
     if not getattr(rollout_first_prompt_and_completion, "initialized", False):
@@ -100,7 +161,6 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     current_observations = ["" for _ in range(num_episodes)]
     done_flags = [False for _ in range(num_episodes)]
     train_rewards = [0.0 for _ in range(num_episodes)]
-    episode_total_rewards = [0.0 for _ in range(num_episodes)]
     episode_lengths = [0 for _ in range(num_episodes)]
     
     # Multi-step accumulator variables (accumulate across all turns)
@@ -123,8 +183,10 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
             # Store episode_id for this game instance
             episode_id = result_block.get("episode_id", "")
             
-            # Get initial observation and append format instructions (only in first turn)
-            observation = result_block.get("observation", "") + GOOFSPIEL_FORMAT_INSTRUCTIONS
+            # Get initial observation, normalize it, and append role + format instructions
+            raw_observation = result_block.get("observation", "")
+            base_observation = format_goofspiel_observation(raw_observation)
+            observation = f"{GOOFSPIEL_SYSTEM_PROMPT}\n\n{base_observation}"
             
             # Initialize messages with first observation
             user_msg = {"role": "user", "content": observation}
@@ -279,60 +341,14 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 step_data = step_res.json()
                 step_block = step_data["result"]
 
-                # Extract response data
-                step_state = step_block.get("observation", "")
+                # Extract response data directly from the environment and normalize it
+                raw_step_state = step_block.get("observation", "")
+                step_state = format_goofspiel_observation(raw_step_state)
                 step_reward = step_block.get("reward", 0)
-                
-                # Multiply base environment reward by 10x
-                shaped_reward = step_reward * 10.0
-                try:
-                    reference_action = None
-                    # 1) Parse current point card from the observation text
-                    point_match = re.search(r"Current point card:\s*(\d+)", obs_before)
-                    if point_match:
-                        point_card = point_match.group(1)
-                        point_card_int = int(point_card)
-                        
-                        # 2) First, try to find Legal Actions block (for error prompts from AgentGym)
-                        legal_section = obs_before
-                        legal_start = obs_before.find("Legal Actions:")
-                        if legal_start != -1:
-                            legal_section = obs_before[legal_start:]
-                            choice_idx = legal_section.find("Your choice")
-                            if choice_idx != -1:
-                                legal_section = legal_section[:choice_idx]
-                            # From legal actions, find the action id whose meaning is: "[P0]Bid: <point_card>"
-                            ref_pattern = rf"(\d+)\s*->\s*\[P0\]Bid:\s*{point_card}\b"
-                            ref_match = re.search(ref_pattern, legal_section)
-                            if ref_match:
-                                reference_action = ref_match.group(1)
-                        else:
-                            # No Legal Actions block - compute from point card value directly
-                            # Check if the point card is in P0's hand
-                            p0_hand_match = re.search(r"P0 hand:\s*([^\n]+)", obs_before)
-                            if p0_hand_match:
-                                p0_hand_str = p0_hand_match.group(1)
-                                # Check if point_card value is in the hand
-                                hand_numbers = re.findall(r'\b\d+\b', p0_hand_str)
-                                if point_card in hand_numbers:
-                                    # Action IDs are 0-indexed: card value 1 -> action 0, card value 2 -> action 1, etc.
-                                    reference_action = str(point_card_int - 1)
-
-                    # 3) If model's action matches this reference action id, add bonus.
-                    if (
-                        reference_action is not None
-                        and isinstance(action_to_send, str)
-                        and action_to_send.isdigit()
-                        and action_to_send == reference_action
-                    ):
-                        shaped_reward += 1.0
-                except Exception:
-                    print(f"Warning: Failed to compute shaped reward for episode {i}")
-                    shaped_reward = step_reward * 10.0
-                
                 step_done = step_block.get("done", False)
-                
-                return i, completion_text, step_state, shaped_reward, step_done, None
+
+                # Return the raw environment reward
+                return i, completion_text, step_state, step_reward, step_done, None
             except Exception as e:
                 print(f"Step failed for episode {i}: {e}")
                 return i, completion_text, "", -0.01, True, e
@@ -347,17 +363,11 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 current_observations[i] = step_state
                 done_flags[i] = step_done
 
-                # Accumulate per-step rewards so we can compute a total over the whole episode.
-                episode_total_rewards[i] += step_reward
+                # Track episode length for debugging/metrics.
                 episode_lengths[i] += 1
 
-                # When an episode finishes, store its total shaped reward in train_rewards.
                 if step_done:
-                    if episode_lengths[i] > 0:
-                        train_rewards[i] = episode_total_rewards[i]
-                    else:
-                        # Fallback: if somehow length is zero, just use the last step reward
-                        train_rewards[i] = step_reward
+                    train_rewards[i] = step_reward
 
                 # Update messages for next turn
                 assistant_msg = {"role": "assistant", "content": completion_text}
