@@ -96,3 +96,6 @@ pm2 start \
     python -u -m validator.tournament.dstack_orchestrator" \
     --name dstack_orchestrator
 
+# Start Grafana and observability stack
+echo "Starting Grafana and observability stack..."
+docker compose --env-file .vali.env -f docker-compose.observability.yml up -d grafana
