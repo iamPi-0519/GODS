@@ -13,12 +13,12 @@ LORA_MODEL_REVISION = None
 
 
 # --- Evaluation Configuration ---
-GAME_TO_EVAL = "goofspiel"
-OPPONENT_TYPE = "mcts"
-NUM_EVALS = 100
+GAME_TO_EVAL = "gin_rummy"
+OPPONENT_TYPE = "random"
+NUM_EVALS = 2000
 TEMPERATURE = 0.0
 RANDOM_SEED = 42
-NUM_CONCURRENT_EVAL_WORKERS = 5
+NUM_CONCURRENT_EVAL_WORKERS = 10
 
 
 ##############################################################################################
@@ -145,7 +145,7 @@ def run_evaluation():
                 "base_url": f"http://sglang-server:{SGLANG_PORT}/v1",
                 "task_id": task_id,
                 "temperature": TEMPERATURE,
-                "seed": RANDOM_SEED,
+                "seed": task_id,
                 "opponent": OPPONENT_TYPE,
                 "api_key": "test"
             }
