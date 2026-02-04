@@ -86,11 +86,16 @@ def get_tournament_gpu_requirement(task_type: TaskType, model_params_count: int,
         return GpuRequirement.H100_8X
 
 
-def get_progressive_threshold(consecutive_wins: int) -> float:
+def get_progressive_threshold(consecutive_wins: int, tournament_type: TournamentType | None = None) -> float:
     """
     Calculate the progressive threshold using exponential decay.
     """
-    current_threshold = t_cst.EXPONENTIAL_BASE_THRESHOLD * (t_cst.EXPONENTIAL_DECAY_RATE ** (consecutive_wins - 1))
+    max_threshold = t_cst.EXPONENTIAL_BASE_THRESHOLD
+
+    if tournament_type and tournament_type == TournamentType.ENVIRONMENT:
+        max_threshold = t_cst.EXPONENTIAL_BASE_THRESHOLD_ENVIRONMENT
+        
+    current_threshold = max_threshold * (t_cst.EXPONENTIAL_DECAY_RATE ** (consecutive_wins - 1))
     return max(t_cst.EXPONENTIAL_MIN_THRESHOLD, current_threshold)
 
 
@@ -515,7 +520,7 @@ async def get_knockout_winners(
         consecutive_wins = await count_champion_consecutive_wins(psql_db, tournament.tournament_type, current_champion)
 
         # Calculate the progressive threshold
-        threshold_percentage = get_progressive_threshold(consecutive_wins)
+        threshold_percentage = get_progressive_threshold(consecutive_wins, tournament.tournament_type)
         logger.info(
             f"Champion {current_champion} has {consecutive_wins} consecutive wins, "
             f"using {threshold_percentage * 100:.1f}% threshold"
@@ -640,7 +645,10 @@ async def get_environment_group_winners(
     completed_round: TournamentRoundData, round_tasks: list[TournamentTask], psql_db: PSQLDB, config: Config
 ) -> list[str]:
     """Get winners from environment tournament group round with progressive threshold for boss.
-    Always returns exactly one winner."""
+    Returns [winner, second_place] where second_place is the runner-up.
+    - If boss wins: 2nd place is highest scoring non-boss (eligible or not)
+    - If challenger wins: 2nd place is second highest scoring participant
+    """
     boss_hotkey = EMISSION_BURN_HOTKEY
 
     for task in round_tasks:
@@ -682,6 +690,8 @@ async def get_environment_group_winners(
             logger.warning(f"Group {group_id} has no valid scores, defaulting to boss as winner")
             return [boss_hotkey]
 
+        all_sorted_participants = sorted(participant_scores.items(), key=lambda x: x[1], reverse=True)
+
         # Get tournament info and calculate progressive threshold
         tournament = await get_tournament(completed_round.tournament_id, psql_db)
         if not tournament:
@@ -690,13 +700,13 @@ async def get_environment_group_winners(
 
         current_champion = tournament.base_winner_hotkey or boss_hotkey
         consecutive_wins = await count_champion_consecutive_wins(psql_db, tournament.tournament_type, current_champion)
-        threshold_percentage = get_progressive_threshold(consecutive_wins)
+        threshold_percentage = get_progressive_threshold(consecutive_wins, tournament.tournament_type)
         logger.info(
             f"Environment tournament final round: Champion {current_champion} has {consecutive_wins} consecutive wins, "
             f"using {threshold_percentage * 100:.1f}% threshold"
         )
 
-        # Apply threshold logic: challengers must beat boss threshold to be eligible
+        eligible_participants = {}
         if boss_score is not None:
             boss_multiplier = 1 + threshold_percentage
             boss_threshold_score = boss_score * boss_multiplier
@@ -706,7 +716,6 @@ async def get_environment_group_winners(
                 f"Boss threshold score: {boss_threshold_score:.6f}"
             )
             
-            eligible_participants = {}
             for hotkey, score in participant_scores.items():
                 if hotkey == boss_hotkey:
                     eligible_participants[hotkey] = score
@@ -722,14 +731,22 @@ async def get_environment_group_winners(
             
             if len(eligible_participants) == 1 and boss_hotkey in eligible_participants:
                 logger.info(f"No challengers beat boss threshold. Boss {boss_hotkey} wins.")
+                # Boss wins - 2nd place is highest scoring non-boss participant
+                second_place = None
+                for hotkey, score in all_sorted_participants:
+                    if hotkey != boss_hotkey:
+                        second_place = hotkey
+                        break
+                if second_place:
+                    logger.info(f"2nd place (highest non-boss): {second_place}")
+                    return [boss_hotkey, second_place]
                 return [boss_hotkey]
-            else:
-                participant_scores = eligible_participants
         else:
             logger.warning(f"Boss score not found for task {task_id}, proceeding without threshold")
+            eligible_participants = participant_scores
 
-        # Sort descending for environment tasks (higher is better)
-        sorted_participants = sorted(participant_scores.items(), key=lambda x: x[1], reverse=True)
+        # Sort eligible participants descending for environment tasks (higher is better)
+        sorted_participants = sorted(eligible_participants.items(), key=lambda x: x[1], reverse=True)
         
         logger.info(
             f"Group {group_id} participants sorted by adjusted loss (descending, higher is better): "
@@ -739,6 +756,16 @@ async def get_environment_group_winners(
         if sorted_participants:
             winner = sorted_participants[0][0]
             logger.info(f"Group {group_id}: Environment tournament winner: {winner}")
+            
+            # Determine 2nd place
+            second_place = None
+            if len(sorted_participants) >= 2:
+                # Challenger won - 2nd place is second in eligible list
+                second_place = sorted_participants[1][0]
+            
+            if second_place:
+                logger.info(f"Group {group_id}: 2nd place: {second_place}")
+                return [winner, second_place]
             return [winner]
 
     logger.warning(f"No winner found for environment tournament round {completed_round.round_id}, defaulting to boss")
