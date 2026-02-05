@@ -162,6 +162,66 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     episode_action_masks = [[] for _ in range(num_episodes)]
     prev_full_ids = [None for _ in range(num_episodes)]
 
+    # --- Helper: log full episode turns (prompt/completion text) in plain text ---
+    def log_episode_turns(episode_index: int) -> None:
+        """
+        For a single complete episode consisting of multiple turns, write out
+        in plain text what the prompt text and completion text of each turn are
+        to a log file.
+
+        We treat each consecutive (user, assistant) pair in accumulated_messages
+        as one turn:
+          - Prompt text  = user message content
+          - Completion   = assistant message content
+        """
+        try:
+            messages = accumulated_messages[episode_index]
+            if not messages:
+                return
+
+            log_path = os.environ.get(
+                "AFFINE_GAME_EPISODE_LOG_PATH",
+                "affine_game_episode_turns.log",
+            )
+
+            lines: list[str] = []
+            lines.append(
+                f"=== Episode index {episode_index}, episode_id={episode_ids[episode_index]} ==="
+            )
+
+            turn_id = 0
+            i = 0
+            # Walk sequentially through messages and pair user/assistant
+            while i < len(messages):
+                msg = messages[i]
+                if (
+                    msg.get("role") == "user"
+                    and i + 1 < len(messages)
+                    and messages[i + 1].get("role") == "assistant"
+                ):
+                    turn_id += 1
+                    prompt_text = msg.get("content", "")
+                    completion_text = messages[i + 1].get("content", "")
+
+                    lines.append(f"Turn {turn_id} - Prompt:")
+                    lines.append(prompt_text)
+                    lines.append("Completion:")
+                    lines.append(completion_text)
+                    lines.append("---")
+                    i += 2
+                else:
+                    i += 1
+
+            lines.append("")  # trailing newline
+
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception as e:
+            # Logging must be best-effort only; never break training
+            print(
+                f"[Affine GAME] Failed to write episode turn log for episode {episode_index}: {e}"
+            )
+
     # --- 4. Reset All Games (Parallel) ---
     def reset_episode(i):
         payload = {"task_id": game_ids[i], "seed": i, "opponent": "mcts"}
@@ -367,6 +427,8 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 if not step_done:
                     user_msg = {"role": "user", "content": step_state}
                     accumulated_messages[i].append(user_msg)
+                else:
+                    log_episode_turns(i)
 
     # --- 6. Return Results ---
     all_prompt_ids = []
