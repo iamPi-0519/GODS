@@ -70,6 +70,29 @@ class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
         t = min(step, self.entropy_decay_steps) / float(self.entropy_decay_steps)
         return float(self.initial_entropy_coef + t * (self.final_entropy_coef - self.initial_entropy_coef))
 
+    def _compute_action_accumulation_tensor(self, action_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Compute a tensor that accumulates action mask values backwards.
+        
+        For action_mask = [1, 1, 0, 0, 0, 1, 0], returns [3, 2, 0, 0, 0, 1, 0]
+        where each position i contains the sum of action_mask values from i to the end,
+        but only for positions where action_mask[i] == 1 (non-action positions get 0).
+        
+        Args:
+            action_mask: Tensor of shape (B, T) with 1s for action tokens and 0s otherwise.
+            
+        Returns:
+            Tensor of shape (B, T) with accumulated counts, zeroed at non-action positions.
+        """
+        # Reverse the mask, compute cumulative sum, then reverse back
+        # This gives us the sum from each position to the end
+        reversed_mask = torch.flip(action_mask, dims=[1])
+        cumsum = torch.cumsum(reversed_mask, dim=1)
+        accumulation_tensor = torch.flip(cumsum, dims=[1])
+        # Zero out non-action positions (multiply by action_mask)
+        accumulation_tensor = accumulation_tensor * action_mask
+        return accumulation_tensor
+
     def _generate_and_score_completions(self, inputs: list[dict[str, torch.Tensor | Any]]) -> dict[str, Any]:
         if getattr(self, "rollout_func", None) is None:
             return super()._generate_and_score_completions(inputs)
@@ -348,6 +371,17 @@ class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
         all_process_advantages = advantages.clone()  # keep the aggregated advantages for logging
         advantages = advantages[process_slice]
 
+        # If action_mask exists, compute per-token accumulated advantages
+        if action_mask is not None:
+            # Compute accumulation tensor: for each position, count remaining action tokens
+            accumulation_tensor = self._compute_action_accumulation_tensor(action_mask)
+            
+            # Expand advantages from (B,) to (B, T) and multiply by accumulation tensor
+            # This accumulates rewards backwards: advantage[i] = sum of advantages from i to end
+            advantages = advantages.unsqueeze(1)  # (B, 1)
+            advantages = advantages.expand(-1, action_mask.size(1))  # (B, T)
+            advantages = advantages * accumulation_tensor  # Multiply by accumulation tensor
+
         # Calculate mean reward per function, but only for samples where the function was applied (non-NaN values)
         for i, reward_func_name in enumerate(self.reward_func_names):
             mean_rewards = torch.nanmean(rewards_per_func[:, i]).item()
@@ -514,11 +548,11 @@ class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
             entropy_mask = self.get_high_entropy_mask(entropies, mask, 1 - self.top_entropy_quantile)
         else:
             entropy_mask = None
-
         # Compute the loss
         advantages = inputs["advantages"]
         # In the base GRPO implementation, advantages are expected to have shape (B,). To support subclasses that
         # provide advantages with shape (B, T) (e.g., MiniLLM), we *conditionally* unsqueeze the tensor.
+        # If action_mask was used, advantages already have shape (B, T) from accumulation.
         if advantages.dim() == 1:
             advantages = advantages.unsqueeze(1)
         # When num_iterations == 1 and steps_per_generation <= gradient_accumulation_steps,
@@ -573,19 +607,30 @@ class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
             if self.args.delta is not None:
                 coef_1 = torch.clamp(coef_1, max=self.args.delta)
 
+            print("--------------------------------")
+            print("[DEBUG]: coef_1 shape: ", coef_1.shape)
+            print("[DEBUG]: coef_2 shape: ", coef_2.shape)
+            print("[DEBUG]: advantages shape: ", advantages.shape)
+            print("--------------------------------")
+
             per_token_loss1 = coef_1 * advantages
             per_token_loss2 = coef_2 * advantages
             per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
         elif self.loss_type == "sapo":
             per_token_loss = torch.empty_like(coef_1)
-            positive_advantages_mask = advantages.repeat([1, coef_1.shape[1]]) > 0
+            # Handle both (B, 1) and (B, T) advantage shapes
+            if advantages.shape[1] == 1:
+                advantages_expanded = advantages.repeat([1, coef_1.shape[1]])
+            else:
+                advantages_expanded = advantages
+            positive_advantages_mask = advantages_expanded > 0
             per_token_loss[positive_advantages_mask] = self.get_sapo_token_loss(
-                coef_1[positive_advantages_mask], self.args.sapo_temperature_pos
+                coef_1[positive_advantages_mask], self.args.saplinho_temperature_pos
             )
             per_token_loss[~positive_advantages_mask] = self.get_sapo_token_loss(
                 coef_1[~positive_advantages_mask], self.args.sapo_temperature_neg
             )
-            per_token_loss = -per_token_loss * advantages
+            per_token_loss = -per_token_loss * advantages_expanded
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
 

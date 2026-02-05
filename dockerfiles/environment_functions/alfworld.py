@@ -76,8 +76,7 @@ def alfworld_rollout_first_prompt_and_completion(prompts: list[str], trainer, ma
     game_ids = []
     current_group_game_id = None
     for i in range(num_episodes):
-        if i % num_generations == 0:
-            # New group - sample a new game_id
+        if i // num_generations == 0:
             current_group_game_id = random.randint(0, DATA_LEN - 1)
         game_ids.append(current_group_game_id)
     current_observations = ["" for _ in range(num_episodes)]

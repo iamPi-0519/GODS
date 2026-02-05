@@ -139,23 +139,14 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     num_episodes = len(prompts)
 
     # --- 2. Game ID Assignment---
-    if trainer.model.training:
-        num_generations = getattr(trainer, "num_generations", 1)
-    else:
-        num_generations = getattr(trainer, "num_generations_eval", getattr(trainer, "num_generations", 1))
-    num_generations = max(1, int(num_generations))
-    
-    game_ids = []
-    episode_ids = []
-    current_group_game_id = None
-    current_group_index = None
-    for i in range(num_episodes):
-        group_index = i // num_generations
-        if group_index != current_group_index:
-            current_group_index = group_index
-            current_group_game_id = random.randint(games_to_task_id_range[selected_game][0], games_to_task_id_range[selected_game][1])
-        game_ids.append(current_group_game_id)
-        episode_ids.append(None)
+    game_ids = [
+        random.randint(
+            games_to_task_id_range[selected_game][0],
+            games_to_task_id_range[selected_game][1]
+        )
+        for _ in range(num_episodes)
+    ]
+    episode_ids = [None] * num_episodes
     
     # --- 3. Per-Episode State Tracking ---
     current_observations = ["" for _ in range(num_episodes)]
@@ -173,7 +164,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
 
     # --- 4. Reset All Games (Parallel) ---
     def reset_episode(i):
-        payload = {"task_id": game_ids[i], "seed": 42, "opponent": "mcts"}
+        payload = {"task_id": game_ids[i], "seed": i, "opponent": "mcts"}
         try:
             reset_res = requests.post(f"{env_endpoint}/reset", json=payload, timeout=TIMEOUT)
             reset_res.raise_for_status()
