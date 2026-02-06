@@ -56,12 +56,14 @@ Winning: Player with most points after all rounds wins.
 
 
 # Output Format
-You must respond with ONLY the action ID (a single number).
-Do NOT include descriptions or explanations.
+First, reason about your strategy inside <think> tags. Do NOT include any numbers or digits in your thinking - use only words.
+Then, provide your action ID inside <answer> tags.
+
+<think>strategy reasoning here, no numbers allowed</think><answer>ACTION_ID</answer>
 
 Examples:
-- For action "0 -> roll": respond "0"
-- For action "89 -> a3": respond "89"
+- For action "0 -> roll": <think>The prize is high and I should bid aggressively</think><answer>0</answer>
+- For action "89 -> a3": <think>I should save my high cards for later</think><answer>89</answer>
 '''.strip()
 
 
@@ -197,7 +199,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     prev_full_ids = [None for _ in range(num_episodes)]
 
     # Per-turn game state tracking for reward computation
-    prev_scores = [(0, 0)] * num_episodes           # (p0, p1) scores before each turn
+    prev_scores = [(0, 0)] * num_episodes                    # (p0, p1) scores before each turn
     episode_prize_cards = [[] for _ in range(num_episodes)]  # prize card values per turn
     episode_round_won = [[] for _ in range(num_episodes)]    # did P0 win each round?
     episode_final_obs = ["" for _ in range(num_episodes)]    # final observation for outcome parsing
@@ -369,57 +371,8 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
             # Keep track of observation used to choose this action for optional reward shaping
             obs_before = current_observations[i]
 
-            # --- Debug logging: write model output and parsed action to file ---
-            try:
-                log_path = os.environ.get("AFFINE_GAME_LOG_PATH", "affine_game_model_outputs.log")
-
-                # Try to infer the "correct" reference action from the observation, for easier debugging
-                reference_action = None
-                point_card = None
-                point_match = re.search(r"Current point card:\s*(\d+)", obs_before)
-                if point_match:
-                    point_card = point_match.group(1)
-                    point_card_int = int(point_card)
-                    
-                    # First, try to find Legal Actions block (for error prompts)
-                    legal_section = obs_before
-                    legal_start = obs_before.find("Legal Actions:")
-                    if legal_start != -1:
-                        legal_section = obs_before[legal_start:]
-                        choice_idx = legal_section.find("Your choice")
-                        if choice_idx != -1:
-                            legal_section = legal_section[:choice_idx]
-                        ref_pattern = rf"(\d+)\s*->\s*\[P0\]Bid:\s*{point_card}\b"
-                        ref_match = re.search(ref_pattern, legal_section)
-                        if ref_match:
-                            reference_action = ref_match.group(1)
-                    else:
-                        # No Legal Actions block - compute from point card value directly
-                        # Check if the point card is in P0's hand
-                        p0_hand_match = re.search(r"P0 hand:\s*([^\n]+)", obs_before)
-                        if p0_hand_match:
-                            p0_hand_str = p0_hand_match.group(1)
-                            # Check if point_card value is in the hand
-                            hand_numbers = re.findall(r'\b\d+\b', p0_hand_str)
-                            if point_card in hand_numbers:
-                                # Action IDs are 0-indexed: card value 1 -> action 0, card value 2 -> action 1, etc.
-                                reference_action = str(point_card_int - 1)
-
-                log_record = {
-                    "turn": int(turn),
-                    "episode_index": int(i),
-                    "action_to_send": action_to_send,
-                    "reference_action": reference_action,
-                    "point_card": point_card,
-                    "completion_text": completion_text,
-                    # Full observation text used to choose this action
-                    "obs_before": obs_before,
-                }
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(log_record) + "\n")
-            except Exception as e:
-                # Best-effort logging; never break training because of logging issues
-                print(f"[Affine GAME] Failed to log model output for episode {i}, turn {turn}: {e}")
+            # --- Per-turn episode logging ---
+            print(f"[Episode {i}] Turn {turn}: prompt={obs_before[:120]}... | completion={completion_text} | action={action_to_send}")
 
             episode_data.append((i, completion_text, action_to_send, obs_before))
         
