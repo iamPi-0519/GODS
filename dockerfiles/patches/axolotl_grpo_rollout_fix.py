@@ -607,12 +607,6 @@ class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
             if self.args.delta is not None:
                 coef_1 = torch.clamp(coef_1, max=self.args.delta)
 
-            print("--------------------------------")
-            print("[DEBUG]: coef_1 shape: ", coef_1.shape)
-            print("[DEBUG]: coef_2 shape: ", coef_2.shape)
-            print("[DEBUG]: advantages shape: ", advantages.shape)
-            print("--------------------------------")
-
             per_token_loss1 = coef_1 * advantages
             per_token_loss2 = coef_2 * advantages
             per_token_loss = -torch.min(per_token_loss1, per_token_loss2)

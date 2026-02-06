@@ -28,9 +28,17 @@ trl:
   num_generations: 8
   use_liger_kernel: true
   rollout_func:
-  entropy_coef_start: 0.0
-  entropy_coef_end: 0.0
-  entropy_decay_steps: 100
+  reward_funcs:
+    - affine_game.reward_outcome
+    - affine_game.reward_margin
+    - affine_game.reward_high_prize_capture
+  reward_weights:
+    - 0.50
+    - 0.35
+    - 0.15
+  entropy_coef_start: 0.01
+  entropy_coef_end: 0.001
+  entropy_decay_steps: 500
 
 eval_strategy: "no"
 sequence_len: 8192

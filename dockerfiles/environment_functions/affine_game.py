@@ -2,8 +2,42 @@
 Notes:
 With the Affine GAME environment when you reset to start a new game you have to choose an 'opponent' type to train against.
 Your two options are 'random' and 'mcts'.
-Miners are free to choose which opponent type they train against. 
+Miners are free to choose which opponent type they train against.
 """
+
+import re
+
+
+def parse_scores_from_observation(obs: str) -> tuple[int, int] | None:
+    """Extract (P0_score, P1_score) from an observation string.
+    Returns None if the pattern isn't found (e.g., Game Over screen)."""
+    match = re.search(r"Player 0:\s*(\d+)\s*points?,\s*Player 1:\s*(\d+)\s*points?", obs)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def parse_prize_card(obs: str) -> int | None:
+    """Extract the current prize card value from an observation string."""
+    match = re.search(r"Current point card:\s*(\d+)", obs)
+    return int(match.group(1)) if match else None
+
+
+def parse_final_outcome(obs: str) -> float:
+    """Parse win/loss/draw from the Game Over observation.
+    Returns +1.0 (win), -1.0 (loss), 0.0 (draw/unknown)."""
+    if "Result: WIN" in obs:
+        return 1.0
+    if "Result: LOSS" in obs:
+        return -1.0
+    if "Result: DRAW" in obs or "Result: TIE" in obs:
+        return 0.0
+    # Fallback: parse "Your Return: X.X"
+    match = re.search(r"Your Return:\s*([-\d.]+)", obs)
+    if match:
+        val = float(match.group(1))
+        return 1.0 if val > 0 else (-1.0 if val < 0 else 0.0)
+    return 0.0
 
 GOOFSPIEL_SYSTEM_PROMPT = '''You are playing goofspiel.
 
@@ -161,6 +195,12 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     episode_logprobs = [[] for _ in range(num_episodes)]
     episode_action_masks = [[] for _ in range(num_episodes)]
     prev_full_ids = [None for _ in range(num_episodes)]
+
+    # Per-turn game state tracking for reward computation
+    prev_scores = [(0, 0)] * num_episodes           # (p0, p1) scores before each turn
+    episode_prize_cards = [[] for _ in range(num_episodes)]  # prize card values per turn
+    episode_round_won = [[] for _ in range(num_episodes)]    # did P0 win each round?
+    episode_final_obs = ["" for _ in range(num_episodes)]    # final observation for outcome parsing
 
     # --- Helper: log full episode turns (prompt/completion text) in plain text ---
     def log_episode_turns(episode_index: int) -> None:
@@ -404,13 +444,16 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 print(f"Step failed for episode {i}: {e}")
                 return i, completion_text, "", -0.01, True, e
         
+        # Build obs_before lookup for per-turn reward tracking
+        obs_before_map = {i: obs for i, _, _, obs in episode_data}
+
         # Execute steps in parallel
         with ThreadPoolExecutor(max_workers=min(len(episode_data), 10)) as executor:
-            futures = [executor.submit(step_episode, i, comp_text, action, obs_before) 
+            futures = [executor.submit(step_episode, i, comp_text, action, obs_before)
                       for i, comp_text, action, obs_before in episode_data]
             for future in as_completed(futures):
                 i, completion_text, step_state, step_reward, step_done, error = future.result()
-                
+
                 current_observations[i] = step_state
                 done_flags[i] = step_done
 
@@ -419,6 +462,22 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
 
                 if step_done:
                     train_rewards[i] = step_reward
+
+                # --- Per-turn tracking for reward computation ---
+                obs_before_for_i = obs_before_map.get(i)
+                if obs_before_for_i and not step_done:
+                    prize = parse_prize_card(obs_before_for_i)
+                    new_scores = parse_scores_from_observation(step_state)
+                    if prize is not None and new_scores is not None:
+                        p0_old, p1_old = prev_scores[i]
+                        p0_new, p1_new = new_scores
+                        p0_gained = p0_new - p0_old
+                        episode_prize_cards[i].append(prize)
+                        episode_round_won[i].append(p0_gained > 0)
+                        prev_scores[i] = new_scores
+
+                if step_done:
+                    episode_final_obs[i] = step_state
 
                 # Update messages for next turn
                 assistant_msg = {"role": "assistant", "content": completion_text}
@@ -430,7 +489,83 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 else:
                     log_episode_turns(i)
 
-    # --- 6. Return Results ---
+    # --- 6. Compute Reward Components ---
+    outcome_rewards = []
+    margin_rewards = []
+    high_prize_rewards = []
+
+    TOTAL_PRIZE_VALUE = 55  # 1+2+...+10 for 10-card Goofspiel
+    HIGH_PRIZE_THRESHOLD = 6  # prizes >= 6 are "high value"
+    HIGH_PRIZE_TOTAL = sum(range(HIGH_PRIZE_THRESHOLD, 11))  # 6+7+8+9+10 = 40
+
+    # Win rate tracking
+    wins = 0
+    losses = 0
+    draws = 0
+    completed_games = 0
+
+    for i in range(num_episodes):
+        if not episode_prompt_ids[i] or not episode_completion_ids[i]:
+            continue
+
+        # 1. Outcome: parse from final observation
+        outcome = parse_final_outcome(episode_final_obs[i])
+        # Fallback: use API reward (1.0=win -> +1.0, 0.0=loss -> -1.0)
+        if outcome == 0.0 and train_rewards[i] != 0.0:
+            outcome = 1.0 if train_rewards[i] > 0 else -1.0
+        outcome_rewards.append(outcome)
+
+        # Track win/loss/draw counts
+        if done_flags[i]:
+            completed_games += 1
+            if outcome > 0:
+                wins += 1
+            elif outcome < 0:
+                losses += 1
+            else:
+                draws += 1
+
+        # 2. Margin: point differential normalized by total prizes
+        p0_final, p1_final = prev_scores[i]
+        if p0_final == 0 and p1_final == 0:
+            margin_rewards.append(outcome * 0.5)
+        else:
+            margin = (p0_final - p1_final) / TOTAL_PRIZE_VALUE
+            margin = max(-1.0, min(1.0, margin))
+            margin_rewards.append(margin)
+
+        # 3. High-prize capture: fraction of high-value prizes won
+        high_prizes_won = sum(
+            prize for prize, won in zip(episode_prize_cards[i], episode_round_won[i])
+            if won and prize >= HIGH_PRIZE_THRESHOLD
+        )
+        high_prize_rewards.append(high_prizes_won / HIGH_PRIZE_TOTAL if HIGH_PRIZE_TOTAL > 0 else 0.0)
+
+    # --- Log win rate to WandB and stdout ---
+    win_rate = wins / max(completed_games, 1)
+    avg_margin = sum(margin_rewards) / max(len(margin_rewards), 1)
+    avg_high_prize = sum(high_prize_rewards) / max(len(high_prize_rewards), 1)
+
+    print(f"[Goofspiel] Batch stats: {wins}W/{losses}L/{draws}D "
+          f"({completed_games} games, win_rate={win_rate:.2%}, "
+          f"avg_margin={avg_margin:.3f}, avg_high_prize={avg_high_prize:.3f})")
+
+    try:
+        import wandb
+        if wandb.run is not None:
+            wandb.log({
+                "game/win_rate": win_rate,
+                "game/wins": wins,
+                "game/losses": losses,
+                "game/draws": draws,
+                "game/completed_games": completed_games,
+                "game/avg_margin": avg_margin,
+                "game/avg_high_prize_capture": avg_high_prize,
+            }, commit=False)
+    except ImportError:
+        pass
+
+    # --- 7. Return Results ---
     all_prompt_ids = []
     all_completion_ids = []
     all_logprobs = []
@@ -460,9 +595,31 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
         "completion_ids": all_completion_ids,
         "logprobs": all_logprobs,
         "env_rewards": all_rewards,
-        "action_mask": all_action_masks
+        "outcome_reward": outcome_rewards,
+        "margin_reward": margin_rewards,
+        "high_prize_reward": high_prize_rewards,
+        "action_mask": all_action_masks,
     }
 
 def rollout_reward_func(completions, **kwargs):
+    """Legacy single-reward function. Kept for backward compatibility."""
     rewards = kwargs.get("env_rewards") if kwargs else None
     return [float(r) for r in rewards] if rewards is not None else [0.0] * len(completions)
+
+
+def reward_outcome(completions, **kwargs):
+    """Win=+1, Draw=0, Loss=-1."""
+    rewards = kwargs.get("outcome_reward")
+    return [float(r) for r in rewards] if rewards else [0.0] * len(completions)
+
+
+def reward_margin(completions, **kwargs):
+    """Normalized point differential (p0 - p1) / total_prizes. Range [-1, +1]."""
+    rewards = kwargs.get("margin_reward")
+    return [float(r) for r in rewards] if rewards else [0.0] * len(completions)
+
+
+def reward_high_prize_capture(completions, **kwargs):
+    """Fraction of high-value prizes (>=6) won. Range [0, 1]."""
+    rewards = kwargs.get("high_prize_reward")
+    return [float(r) for r in rewards] if rewards else [0.0] * len(completions)
