@@ -46,6 +46,7 @@ TASK_ID_MIN, TASK_ID_MAX = GAMES_TO_TASK_ID_RANGE[GAME_TO_EVAL]
 def run_evaluation():
     containers = {}
     avg_score = 0.0
+    win_count = 0
 
     try:
         # 1. Infrastructure Setup
@@ -169,6 +170,8 @@ def run_evaluation():
                 task_id, score, error = future.result()
                 completed += 1
                 total_score += score
+                if score == 1.0:
+                    win_count += 1
                 if error:
                     print(f"[{completed}/{NUM_EVALS}] Task {task_id}: FAILED ({error})")
                 else:
@@ -179,6 +182,7 @@ def run_evaluation():
 
         print(f"\n✅ Evaluation complete.")
         print(f"Score: {total_score}/{NUM_EVALS} ({avg_score:.4f})")
+        print(f"Win Count: {win_count}/{NUM_EVALS} ({win_count/NUM_EVALS})")
 
     finally:
         print("🧹 Cleaning up containers...")
