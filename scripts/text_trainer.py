@@ -119,8 +119,12 @@ def create_config(task_id, model, dataset, dataset_type, file_format, output_dir
             config["trl"]["reward_weights"] = [1.0]
         elif dataset_type.environment_name == "game":
             config["trl"]["rollout_func"] = "affine_game.rollout_first_prompt_and_completion"
-            config["trl"]["reward_funcs"] = ["affine_game.rollout_reward_func"]
-            config["trl"]["reward_weights"] = [1.0]
+            config["trl"]["reward_funcs"] = [
+                "affine_game.reward_outcome",
+                "affine_game.reward_margin",
+                "affine_game.reward_high_prize_capture",
+            ]
+            config["trl"]["reward_weights"] = [0.50, 0.35, 0.15]
 
     if file_format != FileFormat.HF.value:
         for ds in config["datasets"]:

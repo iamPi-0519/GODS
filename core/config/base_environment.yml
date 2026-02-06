@@ -19,14 +19,14 @@ vllm:
   max_model_len: 8192
   enable_prefix_caching: True
 trl:
-  beta: 0.001
+  beta: 0.01
   max_completion_length: 256
   temperature: 0.7
   use_vllm: true
   vllm_mode: colocate
   vllm_enable_sleep_mode: false
   num_generations: 8
-  use_liger_kernel: true
+  use_liger_kernel: false
   rollout_func:
   reward_funcs:
     - affine_game.reward_outcome
@@ -58,7 +58,7 @@ gradient_accumulation_steps: 16
 micro_batch_size: 2
 optimizer: adamw_bnb_8bit
 lr_scheduler: cosine
-learning_rate: 2.5e-5
+learning_rate: 5e-5
 max_grad_norm: 1.0
 
 train_on_inputs: false

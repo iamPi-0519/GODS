@@ -375,9 +375,13 @@ class ActionMaskedGRPOTrainer(AxolotlGRPOTrainer):
         if action_mask is not None:
             # Compute accumulation tensor: for each position, count remaining action tokens
             accumulation_tensor = self._compute_action_accumulation_tensor(action_mask)
-            
+
+            # Normalize: scale so average weight per action token ≈ 1.0
+            action_counts = action_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+            accum_sums = accumulation_tensor.sum(dim=1, keepdim=True).clamp(min=1.0)
+            accumulation_tensor = accumulation_tensor * (action_counts / accum_sums)
+
             # Expand advantages from (B,) to (B, T) and multiply by accumulation tensor
-            # This accumulates rewards backwards: advantage[i] = sum of advantages from i to end
             advantages = advantages.unsqueeze(1)  # (B, 1)
             advantages = advantages.expand(-1, action_mask.size(1))  # (B, T)
             advantages = advantages * accumulation_tensor  # Multiply by accumulation tensor
