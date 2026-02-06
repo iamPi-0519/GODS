@@ -56,14 +56,13 @@ Winning: Player with most points after all rounds wins.
 
 
 # Output Format
-First, reason about your strategy inside <think> tags. Do NOT include any numbers or digits in your thinking - use only words.
-Then, provide your action ID inside <answer> tags.
+First, reason about your strategy inside <think> tags. Then, provide your action ID inside <answer> tags.
 
-<think>strategy reasoning here, no numbers allowed</think><answer>ACTION_ID</answer>
+<think>strategy reasoning here</think><answer>ACTION_ID</answer>
 
 Examples:
-- For action "0 -> roll": <think>The prize is high and I should bid aggressively</think><answer>0</answer>
-- For action "89 -> a3": <think>I should save my high cards for later</think><answer>89</answer>
+- If the legal actions are "0 -> [P0]Bid: 1, 3 -> [P0]Bid: 3, 4 -> [P0]Bid: 5" and you want to bid 5: <think>The prize card is worth 4 points. I have cards 1, 3, and 5. Bidding 5 gives me a good chance to win this prize. The action id of bidding 5 is 4. Therefore my answer should be 4.</think><answer>4</answer>
+- If the legal actions are "1 -> [P0]Bid: 2, 6 -> [P0]Bid: 7" and you want to bid 2: <think>The prize is low so I should save my high card for later and bid low. The action id of bidding 2 is 1. Therefore my answer should be 1.</think><answer>1</answer>
 '''.strip()
 
 
@@ -361,18 +360,28 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 if prev_full_ids[i] is not None:
                     prev_full_ids[i] = prev_full_ids[i] + completion_ids
 
-            # --- Parse Action: first integer in the answer ---
+            # --- Parse Action: extract number from <answer> tag ---
             text = completion_text.strip()
             if text.endswith("</s>"):
                 text = text[:-5].strip()
-            match = re.search(r"\d+", text)
-            action_to_send = match.group(0) if match else text
+            answer_match = re.search(r"<answer>\s*(\d+)\s*</answer>", text)
+            if answer_match:
+                action_to_send = answer_match.group(1)
+            else:
+                # Fallback: first integer in text
+                fallback_match = re.search(r"\d+", text)
+                action_to_send = fallback_match.group(0) if fallback_match else text
             
             # Keep track of observation used to choose this action for optional reward shaping
             obs_before = current_observations[i]
 
             # --- Per-turn episode logging ---
-            print(f"[Episode {i}] Turn {turn}: prompt={obs_before[:120]}... | completion={completion_text} | action={action_to_send}")
+            try:
+                log_path = os.environ.get("AFFINE_GAME_LOG_PATH", "affine_game_episodes.log")
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[Episode {i}] Turn {turn}: prompt={obs_before[:120]}... | completion={completion_text} | action={action_to_send}\n")
+            except Exception:
+                pass
 
             episode_data.append((i, completion_text, action_to_send, obs_before))
         
