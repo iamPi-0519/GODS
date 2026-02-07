@@ -336,16 +336,10 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
             else:
                 if prev_full_ids[i] is None:
                     prev_full_ids[i] = prompt_ids.copy()
-                elif prompt_ids[: len(prev_full_ids[i])] != prev_full_ids[i]:
-                    # BPE mismatch - tokenizer produced different IDs for same prefix text
-                    # Graceful fallback: skip delta masking for this turn, just add completion
-                    print(
-                        f"Warning: BPE mismatch at turn {turn} for episode {i} (expected prefix {len(prev_full_ids[i])}, "
-                        f"got {len(prompt_ids)} tokens). Skipping delta mask for this turn."
-                    )
-                    # Reset prev_full_ids to current prompt to try to recover alignment
-                    prev_full_ids[i] = prompt_ids.copy()
                 else:
+                    if prompt_ids[: len(prev_full_ids[i])] != prev_full_ids[i]:
+                        num_diff = sum(x != y for x, y in zip(prompt_ids[len(: prev_full_ids[i])], prev_full_ids[i]))
+                        print(f"Warning: BPE mismatch at turn {turn} for episode {i}: {num_diff} tokens differ, ratio {100 * num_diff / len(prev_full_ids[i]).2f}%")
                     delta_prompt_ids = prompt_ids[len(prev_full_ids[i]) :]
                     if delta_prompt_ids:
                         episode_completion_ids[i].extend(delta_prompt_ids)
