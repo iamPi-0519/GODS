@@ -200,8 +200,6 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
 
     # Per-turn game state tracking for reward computation
     prev_scores = [(0, 0)] * num_episodes                    # (p0, p1) scores before each turn
-    episode_prize_cards = [[] for _ in range(num_episodes)]  # prize card values per turn
-    episode_round_results = [[] for _ in range(num_episodes)]  # +1 P0 won, -1 P1 won, 0 tie
     episode_final_obs = ["" for _ in range(num_episodes)]    # final observation for outcome parsing
 
     # --- Helper: log full episode turns (prompt/completion text) in plain text ---
@@ -339,7 +337,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                     prev_full_ids[i] = prompt_ids.copy()
                 else:
                     if prompt_ids[: len(prev_full_ids[i])] != prev_full_ids[i]:
-                        num_diff = sum(x != y for x, y in zip(prompt_ids[len(: prev_full_ids[i])], prev_full_ids[i]))
+                        num_diff = sum(x != y for x, y in zip(prompt_ids[: len(prev_full_ids[i])], prev_full_ids[i]))
                         print(f"Warning: BPE mismatch at turn {turn} for episode {i}: {num_diff} tokens differ, ratio {100 * num_diff / len(prev_full_ids[i]).2f}%")
                     delta_prompt_ids = prompt_ids[len(prev_full_ids[i]) :]
                     if delta_prompt_ids:
@@ -421,17 +419,17 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 if step_done:
                     train_rewards[i] = step_reward
 
-                # --- Per-turn tracking for reward computation ---
+                # --- Per-turn score tracking for margin reward ---
                 obs_before_for_i = obs_before_map.get(i)
                 if obs_before_for_i:
-                    prize = parse_prize_card(obs_before_for_i)
                     if not step_done:
                         new_scores = parse_scores_from_observation(step_state)
                     else:
                         # Game Over text has no point scores; reconstruct from bids
+                        prize = parse_prize_card(obs_before_for_i)
                         action_sent = action_map.get(i)
                         opp_action = step_info.get("last_opponent_action") if step_info else None
-                        if action_sent is not None and opp_action is not None and prize is not None:
+                        if prize is not None and action_sent is not None and opp_action is not None:
                             try:
                                 p0_bid = int(action_sent) + 1
                                 p1_bid = int(opp_action) + 1
@@ -446,18 +444,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                                 new_scores = None
                         else:
                             new_scores = None
-                    if prize is not None and new_scores is not None:
-                        p0_old, p1_old = prev_scores[i]
-                        p0_new, p1_new = new_scores
-                        p0_gained = p0_new - p0_old
-                        p1_gained = p1_new - p1_old
-                        episode_prize_cards[i].append(prize)
-                        if p0_gained > 0:
-                            episode_round_results[i].append(1)
-                        elif p1_gained > 0:
-                            episode_round_results[i].append(-1)
-                        else:
-                            episode_round_results[i].append(0)
+                    if new_scores is not None:
                         prev_scores[i] = new_scores
 
                 if step_done:
@@ -476,11 +463,8 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     # --- 6. Compute Reward Components ---
     outcome_rewards = []
     margin_rewards = []
-    high_prize_rewards = []
 
     TOTAL_PRIZE_VALUE = 55  # 1+2+...+10 for 10-card Goofspiel
-    HIGH_PRIZE_THRESHOLD = 6  # prizes >= 6 are "high value"
-    HIGH_PRIZE_TOTAL = sum(range(HIGH_PRIZE_THRESHOLD, 11))  # 6+7+8+9+10 = 40
 
     # Win rate tracking
     wins = 0
@@ -518,22 +502,13 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
             margin = max(-1.0, min(1.0, margin))
             margin_rewards.append(margin)
 
-        # 3. High-prize capture: symmetric score for high-value prizes
-        high_prize_diff = sum(
-            prize * result
-            for prize, result in zip(episode_prize_cards[i], episode_round_results[i])
-            if prize >= HIGH_PRIZE_THRESHOLD
-        )
-        high_prize_rewards.append(high_prize_diff / HIGH_PRIZE_TOTAL if HIGH_PRIZE_TOTAL > 0 else 0.0)
-
     # --- Log win rate to WandB and stdout ---
     win_rate = wins / max(completed_games, 1)
     avg_margin = sum(margin_rewards) / max(len(margin_rewards), 1)
-    avg_high_prize = sum(high_prize_rewards) / max(len(high_prize_rewards), 1)
 
     print(f"[Goofspiel] Batch stats: {wins}W/{losses}L/{draws}D "
           f"({completed_games} games, win_rate={win_rate:.2%}, "
-          f"avg_margin={avg_margin:.3f}, avg_high_prize={avg_high_prize:.3f})")
+          f"avg_margin={avg_margin:.3f})")
 
     try:
         import wandb
@@ -545,7 +520,6 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 "game/draws": draws,
                 "game/completed_games": completed_games,
                 "game/avg_margin": avg_margin,
-                "game/avg_high_prize_capture": avg_high_prize,
             }, commit=False)
     except ImportError:
         pass
@@ -582,7 +556,6 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
         "env_rewards": all_rewards,
         "outcome_reward": outcome_rewards,
         "margin_reward": margin_rewards,
-        "high_prize_reward": high_prize_rewards,
         "action_mask": all_action_masks,
     }
 
@@ -604,7 +577,3 @@ def reward_margin(completions, **kwargs):
     return [float(r) for r in rewards] if rewards else [0.0] * len(completions)
 
 
-def reward_high_prize_capture(completions, **kwargs):
-    """Symmetric high-prize score: P0 wins minus P1 wins for prizes >=6, normalized. Range [-1, +1]."""
-    rewards = kwargs.get("high_prize_reward")
-    return [float(r) for r in rewards] if rewards else [0.0] * len(completions)
