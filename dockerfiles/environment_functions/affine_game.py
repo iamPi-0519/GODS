@@ -39,6 +39,7 @@ def parse_final_outcome(obs: str) -> float:
         return 1.0 if val > 0 else (-1.0 if val < 0 else 0.0)
     return 0.0
 
+
 GOOFSPIEL_SYSTEM_PROMPT = '''You are playing goofspiel.
 
 # Game Rules
@@ -61,8 +62,8 @@ First, reason about your strategy inside <think> tags. Then, provide your action
 <think>strategy reasoning here</think><answer>ACTION_ID</answer>
 
 Examples:
-- If the legal actions are "0 -> [P0]Bid: 1, 3 -> [P0]Bid: 3, 4 -> [P0]Bid: 5" and you want to bid 5: <think>The prize card is worth 4 points. I have cards 1, 3, and 5. Bidding 5 gives me a good chance to win this prize. The action id of bidding 5 is 4. Therefore my answer should be 4.</think><answer>4</answer>
-- If the legal actions are "1 -> [P0]Bid: 2, 6 -> [P0]Bid: 7" and you want to bid 2: <think>The prize is low so I should save my high card for later and bid low. The action id of bidding 2 is 1. Therefore my answer should be 1.</think><answer>1</answer>
+- If the legal actions are "0 -> [P0]Bid: 1, 2 -> [P0]Bid: 3, 4 -> [P0]Bid: 5" and you want to bid 5: <think>Your thought on why to bid 5 here... The action id of bidding 5 is 4. Therefore my answer should be 4.</think><answer>4</answer>
+- If the legal actions are "1 -> [P0]Bid: 2, 6 -> [P0]Bid: 7" and you want to bid 2: <think>Your thought on why to bid 2 here... The action id of bidding 2 is 1. Therefore my answer should be 1.</think><answer>1</answer>
 '''.strip()
 
 
@@ -200,7 +201,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     # Per-turn game state tracking for reward computation
     prev_scores = [(0, 0)] * num_episodes                    # (p0, p1) scores before each turn
     episode_prize_cards = [[] for _ in range(num_episodes)]  # prize card values per turn
-    episode_round_won = [[] for _ in range(num_episodes)]    # did P0 win each round?
+    episode_round_results = [[] for _ in range(num_episodes)]  # +1 P0 won, -1 P1 won, 0 tie
     episode_final_obs = ["" for _ in range(num_episodes)]    # final observation for outcome parsing
 
     # --- Helper: log full episode turns (prompt/completion text) in plain text ---
@@ -393,22 +394,23 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 step_state = format_goofspiel_observation(raw_step_state)
                 step_reward = step_block.get("reward", 0)
                 step_done = step_block.get("done", False)
+                step_info = step_block.get("info", {})
 
-                # Return the raw environment reward
-                return i, completion_text, step_state, step_reward, step_done, None
+                return i, completion_text, step_state, step_reward, step_done, step_info
             except Exception as e:
                 print(f"Step failed for episode {i}: {e}")
-                return i, completion_text, "", -0.01, True, e
+                return i, completion_text, "", -0.01, True, {}
         
-        # Build obs_before lookup for per-turn reward tracking
+        # Build lookups for per-turn reward tracking
         obs_before_map = {i: obs for i, _, _, obs in episode_data}
+        action_map = {i: action for i, _, action, _ in episode_data}
 
         # Execute steps in parallel
         with ThreadPoolExecutor(max_workers=min(len(episode_data), 10)) as executor:
             futures = [executor.submit(step_episode, i, comp_text, action, obs_before)
                       for i, comp_text, action, obs_before in episode_data]
             for future in as_completed(futures):
-                i, completion_text, step_state, step_reward, step_done, error = future.result()
+                i, completion_text, step_state, step_reward, step_done, step_info = future.result()
 
                 current_observations[i] = step_state
                 done_flags[i] = step_done
@@ -421,15 +423,41 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
 
                 # --- Per-turn tracking for reward computation ---
                 obs_before_for_i = obs_before_map.get(i)
-                if obs_before_for_i and not step_done:
+                if obs_before_for_i:
                     prize = parse_prize_card(obs_before_for_i)
-                    new_scores = parse_scores_from_observation(step_state)
+                    if not step_done:
+                        new_scores = parse_scores_from_observation(step_state)
+                    else:
+                        # Game Over text has no point scores; reconstruct from bids
+                        action_sent = action_map.get(i)
+                        opp_action = step_info.get("last_opponent_action") if step_info else None
+                        if action_sent is not None and opp_action is not None and prize is not None:
+                            try:
+                                p0_bid = int(action_sent) + 1
+                                p1_bid = int(opp_action) + 1
+                                p0_old, p1_old = prev_scores[i]
+                                if p0_bid > p1_bid:
+                                    new_scores = (p0_old + prize, p1_old)
+                                elif p1_bid > p0_bid:
+                                    new_scores = (p0_old, p1_old + prize)
+                                else:
+                                    new_scores = (p0_old, p1_old)  # tie
+                            except (ValueError, TypeError):
+                                new_scores = None
+                        else:
+                            new_scores = None
                     if prize is not None and new_scores is not None:
                         p0_old, p1_old = prev_scores[i]
                         p0_new, p1_new = new_scores
                         p0_gained = p0_new - p0_old
+                        p1_gained = p1_new - p1_old
                         episode_prize_cards[i].append(prize)
-                        episode_round_won[i].append(p0_gained > 0)
+                        if p0_gained > 0:
+                            episode_round_results[i].append(1)
+                        elif p1_gained > 0:
+                            episode_round_results[i].append(-1)
+                        else:
+                            episode_round_results[i].append(0)
                         prev_scores[i] = new_scores
 
                 if step_done:
@@ -490,12 +518,13 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
             margin = max(-1.0, min(1.0, margin))
             margin_rewards.append(margin)
 
-        # 3. High-prize capture: fraction of high-value prizes won
-        high_prizes_won = sum(
-            prize for prize, won in zip(episode_prize_cards[i], episode_round_won[i])
-            if won and prize >= HIGH_PRIZE_THRESHOLD
+        # 3. High-prize capture: symmetric score for high-value prizes
+        high_prize_diff = sum(
+            prize * result
+            for prize, result in zip(episode_prize_cards[i], episode_round_results[i])
+            if prize >= HIGH_PRIZE_THRESHOLD
         )
-        high_prize_rewards.append(high_prizes_won / HIGH_PRIZE_TOTAL if HIGH_PRIZE_TOTAL > 0 else 0.0)
+        high_prize_rewards.append(high_prize_diff / HIGH_PRIZE_TOTAL if HIGH_PRIZE_TOTAL > 0 else 0.0)
 
     # --- Log win rate to WandB and stdout ---
     win_rate = wins / max(completed_games, 1)
@@ -576,6 +605,6 @@ def reward_margin(completions, **kwargs):
 
 
 def reward_high_prize_capture(completions, **kwargs):
-    """Fraction of high-value prizes (>=6) won. Range [0, 1]."""
+    """Symmetric high-prize score: P0 wins minus P1 wins for prizes >=6, normalized. Range [-1, +1]."""
     rewards = kwargs.get("high_prize_reward")
     return [float(r) for r in rewards] if rewards else [0.0] * len(completions)
