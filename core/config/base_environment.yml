@@ -29,11 +29,9 @@ trl:
   use_liger_kernel: false
   rollout_func:
   reward_funcs:
-    - affine_game.reward_outcome
-    - affine_game.reward_margin
+    - affine_game.rollout_reward_func
   reward_weights:
-    - 0.60
-    - 0.40
+    - 1.0
   entropy_coef_start: 0.01
   entropy_coef_end: 0.001
   entropy_decay_steps: 500
