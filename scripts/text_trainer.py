@@ -118,8 +118,7 @@ def create_config(task_id, model, dataset, dataset_type, file_format, output_dir
             config["trl"]["reward_funcs"] = ["alfworld.alfworld_rollout_reward_func"]
             config["trl"]["reward_weights"] = [1.0]
         elif dataset_type.environment_name == "game":
-            config["trl"]["rollout_func"] = "affine_game.rollout_full_prompt_and_completion_parallelized_curriculum(
-"
+            config["trl"]["rollout_func"] = "affine_game.rollout_full_prompt_and_completion_parallelized_curriculum"
             config["trl"]["reward_funcs"] = [
                 "affine_game.rollout_reward_func",
             ]
