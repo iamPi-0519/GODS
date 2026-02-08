@@ -215,7 +215,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
     selected_game = "goofspiel"
 
     # --- 1. Static Initialization (Once per Rank) ---
-    if not getattr(rollout_full_prompt_and_completion_parallelized, "initialized", False):
+    if not getattr(rollout_full_prompt_and_completion_parallelized_curriculum, "initialized", False):
         rank = int(os.environ.get("LOCAL_RANK", "0"))
         raw_urls = os.environ.get("ENVIRONMENT_SERVER_URLS", "")
         server_urls = [u.strip() for u in raw_urls.split(",") if u.strip()]
@@ -237,17 +237,17 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             except Exception as e:
                 raise RuntimeError(f"Failed to init server {base_url}: {e}")
 
-        rollout_full_prompt_and_completion_parallelized.rank = rank
-        rollout_full_prompt_and_completion_parallelized.env_pool = env_pool
-        rollout_full_prompt_and_completion_parallelized.num_servers = len(env_pool)
-        rollout_full_prompt_and_completion_parallelized.initialized = True
-        rollout_full_prompt_and_completion_parallelized.thread_pool = ThreadPoolExecutor(max_workers=len(env_pool))
-        rollout_full_prompt_and_completion_parallelized.generation_semaphore = Semaphore(1)
-        rollout_full_prompt_and_completion_parallelized.games_to_task_id_range = games_to_task_id_range
-        rollout_full_prompt_and_completion_parallelized.selected_game = selected_game
+        rollout_full_prompt_and_completion_parallelized_curriculum.rank = rank
+        rollout_full_prompt_and_completion_parallelized_curriculum.env_pool = env_pool
+        rollout_full_prompt_and_completion_parallelized_curriculum.num_servers = len(env_pool)
+        rollout_full_prompt_and_completion_parallelized_curriculum.initialized = True
+        rollout_full_prompt_and_completion_parallelized_curriculum.thread_pool = ThreadPoolExecutor(max_workers=len(env_pool))
+        rollout_full_prompt_and_completion_parallelized_curriculum.generation_semaphore = Semaphore(1)
+        rollout_full_prompt_and_completion_parallelized_curriculum.games_to_task_id_range = games_to_task_id_range
+        rollout_full_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
         
         # Initialize curriculum scheduler
-        rollout_full_prompt_and_completion_parallelized.curriculum = CurriculumScheduler(
+        rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
             initial_max_turn=trainer.args.initial_max_turn,
             final_max_turn=13,
             rollouts_per_stage=trainer.args.rollouts_per_stage,
@@ -258,12 +258,12 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=13, rollouts_per_stage={trainer.args.rollouts_per_stage}, initial_hint_prob=0.75, final_hint_prob=0.0, warmup_rollouts={trainer.args.rollouts_per_stage}")
 
     # Retrieve static variables
-    rank = rollout_full_prompt_and_completion_parallelized.rank
-    env_pool = rollout_full_prompt_and_completion_parallelized.env_pool
-    num_servers = rollout_full_prompt_and_completion_parallelized.num_servers
-    games_to_task_id_range = rollout_full_prompt_and_completion_parallelized.games_to_task_id_range
-    selected_game = rollout_full_prompt_and_completion_parallelized.selected_game
-    curriculum = rollout_full_prompt_and_completion_parallelized.curriculum
+    rank = rollout_full_prompt_and_completion_parallelized_curriculum.rank
+    env_pool = rollout_full_prompt_and_completion_parallelized_curriculum.env_pool
+    num_servers = rollout_full_prompt_and_completion_parallelized_curriculum.num_servers
+    games_to_task_id_range = rollout_full_prompt_and_completion_parallelized_curriculum.games_to_task_id_range
+    selected_game = rollout_full_prompt_and_completion_parallelized_curriculum.selected_game
+    curriculum = rollout_full_prompt_and_completion_parallelized_curriculum.curriculum
     
     tokenizer = trainer.processing_class
     TIMEOUT = 2400
@@ -339,7 +339,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
             
             # Generate Rollout Completion
             # Only allow one thread to generate rollout completions at a time
-            with rollout_full_prompt_and_completion_parallelized.generation_semaphore:
+            with rollout_full_prompt_and_completion_parallelized_curriculum.generation_semaphore:
                 rollout_outputs = generate_rollout_completions(trainer, prompts=[messages], as_chat=True)[0]
 
             prompt_ids = rollout_outputs.get("prompt_ids", [])
@@ -493,7 +493,7 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
 
     # --- Execute in parallel ---
     results = [None] * len(prompts)
-    executor = rollout_full_prompt_and_completion_parallelized.thread_pool
+    executor = rollout_full_prompt_and_completion_parallelized_curriculum.thread_pool
 
     futures = [
         executor.submit(run_single_prompt, i, p)
