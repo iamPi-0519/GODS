@@ -247,15 +247,21 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
         rollout_full_prompt_and_completion_parallelized_curriculum.selected_game = selected_game
         
         # Initialize curriculum scheduler
+        initial_max_turn = getattr(trainer.args, "initial_max_turn", None)
+        if initial_max_turn is None:
+            initial_max_turn = 1
+        rollouts_per_stage = getattr(trainer.args, "rollouts_per_stage", None)
+        if rollouts_per_stage is None:
+            rollouts_per_stage = 1280
         rollout_full_prompt_and_completion_parallelized_curriculum.curriculum = CurriculumScheduler(
-            initial_max_turn=trainer.args.initial_max_turn,
+            initial_max_turn=initial_max_turn,
             final_max_turn=13,
-            rollouts_per_stage=trainer.args.rollouts_per_stage,
+            rollouts_per_stage=rollouts_per_stage,
             initial_hint_prob=0.75,
             final_hint_prob=0.0,
-            warmup_rollouts=trainer.args.rollouts_per_stage,
+            warmup_rollouts=rollouts_per_stage,
         )
-        print(f"[CURRICULUM] Initialized with initial_max_turn={trainer.args.initial_max_turn}, final_max_turn=13, rollouts_per_stage={trainer.args.rollouts_per_stage}, initial_hint_prob=0.75, final_hint_prob=0.0, warmup_rollouts={trainer.args.rollouts_per_stage}")
+        print(f"[CURRICULUM] Initialized with initial_max_turn={initial_max_turn}, final_max_turn=13, rollouts_per_stage={rollouts_per_stage}, initial_hint_prob=0.75, final_hint_prob=0.0, warmup_rollouts={rollouts_per_stage}")
 
     # Retrieve static variables
     rank = rollout_full_prompt_and_completion_parallelized_curriculum.rank
@@ -276,7 +282,8 @@ def rollout_full_prompt_and_completion_parallelized_curriculum(
 
     def run_single_prompt(index: int, prompt: str):
         # Generate a random game_id for this episode
-        game_id = int(prompt)
+        min_id, max_id = games_to_task_id_range[selected_game]
+        game_id = random.randint(min_id, max_id)
 
         # Select server based on index and rank
         server_idx = (index + rank) % num_servers
