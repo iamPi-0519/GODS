@@ -5,7 +5,12 @@ Your two options are 'random' and 'mcts'.
 Miners are free to choose which opponent type they train against.
 """
 
+import os
+import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
 
 
 GOOFSPIEL_SYSTEM_PROMPT = '''You are playing goofspiel.
@@ -35,95 +40,175 @@ Examples:
 '''.strip()
 
 
-def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: int = 30) -> dict[str, list]:
-    from trl.experimental.openenv import generate_rollout_completions
-    import os
-    import random
-    import requests
-    import json
-    import re
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+MAX_EPISODE_TOKENS = 16384  # Max tokens for completion sequence (truncate if exceeded)
+MAX_PROMPT_LEN = 24576      # Max prompt tokens before ending episode early
+REQUEST_TIMEOUT = 2400
+MAX_PARALLEL_REQUESTS = 10
+SELECTED_GAME = "goofspiel"
 
-    # --- Constants for context length management ---
-    MAX_EPISODE_TOKENS = 16384  # Max tokens for completion sequence (truncate if exceeded)
-    MAX_PROMPT_LEN = 24576      # Max prompt tokens before ending episode early
+GAMES_TO_TASK_ID_RANGE = {
+    "goofspiel": (0, 99999999),
+    "liars_dice": (100000000, 199999999),
+    "leduc_poker": (200000000, 299999999),
+    "gin_rummy": (300000000, 399999999),
+    "othello": (400000000, 499999999),
+    "backgammon": (500000000, 599999999),
+    "hex": (600000000, 699999999),
+    "clobber": (700000000, 799999999),
+}
 
-    games_to_task_id_range = {
-        "goofspiel": (0, 99999999),
-        "liars_dice": (100000000, 199999999),
-        "leduc_poker": (200000000, 299999999),
-        "gin_rummy": (300000000, 399999999),
-        "othello": (400000000, 499999999),
-        "backgammon": (500000000, 599999999),
-        "hex": (600000000, 699999999),
-        "clobber": (700000000, 799999999),
-    }
 
-    selected_game = "goofspiel"
+def format_goofspiel_observation(raw_obs: str) -> str:
+    """
+    Parse the raw Goofspiel observation from the environment and return a
+    normalized format that also includes a Legal Actions block for P0.
+    If parsing fails, fall back to the original observation.
+    """
+    try:
+        point_match = re.search(r"Current point card:\s*(\d+)", raw_obs)
+        remaining_match = re.search(r"Remaining Point Cards:\s*([^\n]+)", raw_obs)
+        p0_hand_match = re.search(r"P0 hand:\s*([^\n]+)", raw_obs)
+        p1_hand_match = re.search(r"P1 hand:\s*([^\n]+)", raw_obs)
+        win_seq_comment_match = re.search(r"\(Win sequence:[^\n]*\)", raw_obs)
+        score_match = re.search(r"Player 0:\s*[^,\n]+,\s*Player 1:\s*[^\n]+", raw_obs)
+        you_are_match = re.search(r"You are Player 0\.", raw_obs)
 
-    # --- Helper: normalize Goofspiel observation and add Legal Actions ---
-    def format_goofspiel_observation(raw_obs: str) -> str:
-        """
-        Parse the raw Goofspiel observation from the environment and return a
-        normalized format that also includes a Legal Actions block for P0.
-        If parsing fails, fall back to the original observation.
-        """
-        try:
-            point_match = re.search(r"Current point card:\s*(\d+)", raw_obs)
-            remaining_match = re.search(r"Remaining Point Cards:\s*([^\n]+)", raw_obs)
-            p0_hand_match = re.search(r"P0 hand:\s*([^\n]+)", raw_obs)
-            p1_hand_match = re.search(r"P1 hand:\s*([^\n]+)", raw_obs)
-            win_seq_comment_match = re.search(r"\(Win sequence:[^\n]*\)", raw_obs)
-            score_match = re.search(r"Player 0:\s*[^,\n]+,\s*Player 1:\s*[^\n]+", raw_obs)
-            you_are_match = re.search(r"You are Player 0\.", raw_obs)
-
-            if not (point_match and remaining_match and p0_hand_match and p1_hand_match and score_match and win_seq_comment_match):
-                return raw_obs
-
-            point_card = point_match.group(1).strip()
-            remaining_cards = remaining_match.group(1).strip()
-            p0_hand_str = p0_hand_match.group(1).strip()
-            p1_hand_str = p1_hand_match.group(1).strip()
-            win_seq_comment = win_seq_comment_match.group(0).strip()
-            score_line = score_match.group(0).strip()
-            you_are_line = you_are_match.group(0).strip() if you_are_match else "You are Player 0."
-
-            # Build Legal Actions from P0 hand.
-            p0_cards = [int(x) for x in re.findall(r"\d+", p0_hand_str)]
-            p0_cards = sorted(set(p0_cards))
-            legal_lines = [f"{card - 1} -> [P0]Bid: {card}" for card in p0_cards]
-
-            lines = [
-                f"Current point card: {point_card}",
-                f"Remaining Point Cards: {remaining_cards}",
-                f"P0 hand: {p0_hand_str}",
-                f"P1 hand: {p1_hand_str}",
-                "Win sequence:",
-                win_seq_comment,
-                score_line,
-                "",
-                "",
-                you_are_line,
-                "Legal Actions:",
-                *legal_lines,
-                "\nYour choice (ID only):"
-            ]
-            return "\n".join(lines)
-        except Exception:
-            # Never break training due to formatting issues
+        if not (
+            point_match
+            and remaining_match
+            and p0_hand_match
+            and p1_hand_match
+            and score_match
+            and win_seq_comment_match
+        ):
             return raw_obs
 
-    # --- 1. Static Initialization (Once per Rank) ---
+        point_card = point_match.group(1).strip()
+        remaining_cards = remaining_match.group(1).strip()
+        p0_hand_str = p0_hand_match.group(1).strip()
+        p1_hand_str = p1_hand_match.group(1).strip()
+        win_seq_comment = win_seq_comment_match.group(0).strip()
+        score_line = score_match.group(0).strip()
+        you_are_line = you_are_match.group(0).strip() if you_are_match else "You are Player 0."
+
+        # Build Legal Actions from P0 hand.
+        p0_cards = [int(x) for x in re.findall(r"\d+", p0_hand_str)]
+        p0_cards = sorted(set(p0_cards))
+        legal_lines = [f"{card - 1} -> [P0]Bid: {card}" for card in p0_cards]
+
+        lines = [
+            f"Current point card: {point_card}",
+            f"Remaining Point Cards: {remaining_cards}",
+            f"P0 hand: {p0_hand_str}",
+            f"P1 hand: {p1_hand_str}",
+            "Win sequence:",
+            win_seq_comment,
+            score_line,
+            "",
+            "",
+            you_are_line,
+            "Legal Actions:",
+            *legal_lines,
+            "\nYour choice (ID only):",
+        ]
+        return "\n".join(lines)
+    except Exception:
+        # Never break training due to formatting issues
+        return raw_obs
+
+
+def extract_action_to_send(completion_text: str) -> str:
+    text = completion_text.strip()
+    if text.endswith("</s>"):
+        text = text[:-5].strip()
+    answer_match = re.search(r"<answer>\s*(\d+)\s*</answer>", text)
+    if answer_match:
+        return answer_match.group(1)
+
+    # Fallback: first integer in text
+    fallback_match = re.search(r"\d+", text)
+    return fallback_match.group(0) if fallback_match else text
+
+
+def log_episode_turns(messages: list[dict], episode_index: int, episode_id: str) -> None:
+    """
+    For a single complete episode consisting of multiple turns, write out
+    in plain text what the prompt text and completion text of each turn are
+    to a log file.
+
+    We treat each consecutive (user, assistant) pair in accumulated_messages
+    as one turn:
+      - Prompt text  = user message content
+      - Completion   = assistant message content
+    """
+    try:
+        if not messages:
+            return
+
+        log_path = os.environ.get(
+            "AFFINE_GAME_EPISODE_LOG_PATH",
+            "affine_game_episode_turns.log",
+        )
+
+        lines: list[str] = []
+        lines.append(
+            f"=== Episode index {episode_index}, episode_id={episode_id} ==="
+        )
+
+        turn_id = 0
+        i = 0
+        # Walk sequentially through messages and pair user/assistant
+        while i < len(messages):
+            msg = messages[i]
+            if (
+                msg.get("role") == "user"
+                and i + 1 < len(messages)
+                and messages[i + 1].get("role") == "assistant"
+            ):
+                turn_id += 1
+                prompt_text = msg.get("content", "")
+                completion_text = messages[i + 1].get("content", "")
+
+                lines.append(f"Turn {turn_id} - Prompt:")
+                lines.append(prompt_text)
+                lines.append("Completion:")
+                lines.append(completion_text)
+                lines.append("---")
+                i += 2
+            else:
+                i += 1
+
+        lines.append("")  # trailing newline
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception as e:
+        # Logging must be best-effort only; never break training
+        print(
+            f"[Affine GAME] Failed to write episode turn log for episode {episode_index}: {e}"
+        )
+
+
+def log_turn(episode_index: int, turn: int, observation: str, completion_text: str, action_to_send: str) -> None:
+    try:
+        log_path = os.environ.get("AFFINE_GAME_LOG_PATH", "affine_game_episodes.log")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"[Episode {episode_index}] Turn {turn}: prompt={observation[:120]}... "
+                f"| completion={completion_text} | action={action_to_send}\n"
+            )
+    except Exception:
+        pass
+
+
+def initialize_env_endpoint() -> str:
     # We check if the function has already established a connection for this worker
     if not getattr(rollout_first_prompt_and_completion, "initialized", False):
-        # Get local rank
         rank = int(os.environ.get("LOCAL_RANK", "0"))
 
-        # Get env server for that local rank
         raw_urls = os.environ.get("ENVIRONMENT_SERVER_URLS", "")
         server_list = [url.strip() for url in raw_urls.split(",") if url.strip()]
-        
-        # Determine endpoint
+
         if not server_list:
             # Fallback (though likely fatal for the task)
             base_url = ""
@@ -131,22 +216,72 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
         else:
             base_url = server_list[rank % len(server_list)]
 
-        # Store endpoint on the function to avoid re-parsing
         rollout_first_prompt_and_completion.base_url = base_url
         rollout_first_prompt_and_completion.initialized = True
         print(f"Affine GAME endpoint initialized on rank {rank} at {base_url}")
 
-    # Retrieve static variables
-    env_endpoint = rollout_first_prompt_and_completion.base_url
+    return rollout_first_prompt_and_completion.base_url
+
+
+def reset_episode(i: int, game_id: int, env_endpoint: str) -> tuple[int, str, str, list[dict], bool]:
+    payload = {"task_id": game_id, "seed": i, "opponent": "mcts"}
+    try:
+        reset_res = requests.post(f"{env_endpoint}/reset", json=payload, timeout=REQUEST_TIMEOUT)
+        reset_res.raise_for_status()
+        reset_data = reset_res.json()
+        result_block = reset_data["result"]
+
+        episode_id = result_block.get("episode_id", "")
+
+        raw_observation = result_block.get("observation", "")
+        base_observation = format_goofspiel_observation(raw_observation)
+        observation = f"{GOOFSPIEL_SYSTEM_PROMPT}\n\n{base_observation}"
+
+        user_msg = {"role": "user", "content": observation}
+        messages = [user_msg]
+
+        return i, episode_id, observation, messages, False
+    except Exception as e:
+        print(f"Failed to reset game {game_id}: {e}")
+        return i, "", "", [], True
+
+
+def step_episode(
+    i: int,
+    completion_text: str,
+    action_to_send: str,
+    episode_id: str,
+    env_endpoint: str,
+) -> tuple[int, str, str, float, bool]:
+    try:
+        step_payload = {"action": action_to_send, "episode_id": episode_id}
+        step_res = requests.post(f"{env_endpoint}/step", json=step_payload, timeout=REQUEST_TIMEOUT)
+        step_res.raise_for_status()
+        step_data = step_res.json()
+        step_block = step_data["result"]
+
+        raw_step_state = step_block.get("observation", "")
+        step_state = format_goofspiel_observation(raw_step_state)
+        step_reward = step_block.get("reward", 0)
+        step_done = step_block.get("done", False)
+
+        return i, completion_text, step_state, step_reward, step_done
+    except Exception as e:
+        print(f"Step failed for episode {i}: {e}")
+        return i, completion_text, "", -0.01, True
+
+
+def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: int = 30) -> dict[str, list]:
+    from trl.experimental.openenv import generate_rollout_completions
+    env_endpoint = initialize_env_endpoint()
     tokenizer = trainer.processing_class
-    TIMEOUT = 2400
     num_episodes = len(prompts)
 
     # --- 2. Game ID Assignment---
     game_ids = [
         random.randint(
-            games_to_task_id_range[selected_game][0],
-            games_to_task_id_range[selected_game][1]
+            GAMES_TO_TASK_ID_RANGE[SELECTED_GAME][0],
+            GAMES_TO_TASK_ID_RANGE[SELECTED_GAME][1],
         )
         for _ in range(num_episodes)
     ]
@@ -171,95 +306,13 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     losses = 0
     completed_games = 0
 
-    # --- Helper: log full episode turns (prompt/completion text) in plain text ---
-    def log_episode_turns(episode_index: int) -> None:
-        """
-        For a single complete episode consisting of multiple turns, write out
-        in plain text what the prompt text and completion text of each turn are
-        to a log file.
-
-        We treat each consecutive (user, assistant) pair in accumulated_messages
-        as one turn:
-          - Prompt text  = user message content
-          - Completion   = assistant message content
-        """
-        try:
-            messages = accumulated_messages[episode_index]
-            if not messages:
-                return
-
-            log_path = os.environ.get(
-                "AFFINE_GAME_EPISODE_LOG_PATH",
-                "affine_game_episode_turns.log",
-            )
-
-            lines: list[str] = []
-            lines.append(
-                f"=== Episode index {episode_index}, episode_id={episode_ids[episode_index]} ==="
-            )
-
-            turn_id = 0
-            i = 0
-            # Walk sequentially through messages and pair user/assistant
-            while i < len(messages):
-                msg = messages[i]
-                if (
-                    msg.get("role") == "user"
-                    and i + 1 < len(messages)
-                    and messages[i + 1].get("role") == "assistant"
-                ):
-                    turn_id += 1
-                    prompt_text = msg.get("content", "")
-                    completion_text = messages[i + 1].get("content", "")
-
-                    lines.append(f"Turn {turn_id} - Prompt:")
-                    lines.append(prompt_text)
-                    lines.append("Completion:")
-                    lines.append(completion_text)
-                    lines.append("---")
-                    i += 2
-                else:
-                    i += 1
-
-            lines.append("")  # trailing newline
-
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
-        except Exception as e:
-            # Logging must be best-effort only; never break training
-            print(
-                f"[Affine GAME] Failed to write episode turn log for episode {episode_index}: {e}"
-            )
-
     # --- 4. Reset All Games (Parallel) ---
-    def reset_episode(i):
-        payload = {"task_id": game_ids[i], "seed": i, "opponent": "mcts"}
-        try:
-            reset_res = requests.post(f"{env_endpoint}/reset", json=payload, timeout=TIMEOUT)
-            reset_res.raise_for_status()
-            reset_data = reset_res.json()
-            result_block = reset_data["result"]
-            
-            # Store episode_id for this game instance
-            episode_id = result_block.get("episode_id", "")
-            
-            # Get initial observation, normalize it, and append role + format instructions
-            raw_observation = result_block.get("observation", "")
-            base_observation = format_goofspiel_observation(raw_observation)
-            observation = f"{GOOFSPIEL_SYSTEM_PROMPT}\n\n{base_observation}"
-            
-            # Initialize messages with first observation
-            user_msg = {"role": "user", "content": observation}
-            messages = [user_msg]
-            
-            return i, episode_id, observation, messages, False
-        except Exception as e:
-            print(f"Failed to reset game {game_ids[i]}: {e}")
-            return i, "", "", [], True
-    
     # Execute resets in parallel
-    with ThreadPoolExecutor(max_workers=min(num_episodes, 10)) as executor:
-        futures = [executor.submit(reset_episode, i) for i in range(num_episodes)]
+    with ThreadPoolExecutor(max_workers=min(num_episodes, MAX_PARALLEL_REQUESTS)) as executor:
+        futures = [
+            executor.submit(reset_episode, i, game_ids[i], env_endpoint)
+            for i in range(num_episodes)
+        ]
         for future in as_completed(futures):
             i, episode_id, observation, messages, failed = future.result()
             episode_ids[i] = episode_id
@@ -323,54 +376,30 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                     prev_full_ids[i] = prev_full_ids[i] + completion_ids
 
             # --- Parse Action: extract number from <answer> tag ---
-            text = completion_text.strip()
-            if text.endswith("</s>"):
-                text = text[:-5].strip()
-            answer_match = re.search(r"<answer>\s*(\d+)\s*</answer>", text)
-            if answer_match:
-                action_to_send = answer_match.group(1)
-            else:
-                # Fallback: first integer in text
-                fallback_match = re.search(r"\d+", text)
-                action_to_send = fallback_match.group(0) if fallback_match else text
-            
+            action_to_send = extract_action_to_send(completion_text)
+
             # Keep track of observation used to choose this action for optional reward shaping
             obs_before = current_observations[i]
 
             # --- Per-turn episode logging ---
-            try:
-                log_path = os.environ.get("AFFINE_GAME_LOG_PATH", "affine_game_episodes.log")
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(f"[Episode {i}] Turn {turn}: prompt={obs_before[:120]}... | completion={completion_text} | action={action_to_send}\n")
-            except Exception:
-                pass
+            log_turn(i, turn, obs_before, completion_text, action_to_send)
 
             episode_data.append((i, completion_text, action_to_send, obs_before))
-        
+
         # --- Step Environments (Parallel) ---
-        def step_episode(i, completion_text, action_to_send, obs_before):
-            try:
-                step_payload = {"action": action_to_send, "episode_id": episode_ids[i]}
-                step_res = requests.post(f"{env_endpoint}/step", json=step_payload, timeout=TIMEOUT)
-                step_res.raise_for_status()
-                step_data = step_res.json()
-                step_block = step_data["result"]
-
-                # Extract response data directly from the environment and normalize it
-                raw_step_state = step_block.get("observation", "")
-                step_state = format_goofspiel_observation(raw_step_state)
-                step_reward = step_block.get("reward", 0)
-                step_done = step_block.get("done", False)
-
-                return i, completion_text, step_state, step_reward, step_done
-            except Exception as e:
-                print(f"Step failed for episode {i}: {e}")
-                return i, completion_text, "", -0.01, True
-        
         # Execute steps in parallel
-        with ThreadPoolExecutor(max_workers=min(len(episode_data), 10)) as executor:
-            futures = [executor.submit(step_episode, i, comp_text, action, obs_before)
-                      for i, comp_text, action, obs_before in episode_data]
+        with ThreadPoolExecutor(max_workers=min(len(episode_data), MAX_PARALLEL_REQUESTS)) as executor:
+            futures = [
+                executor.submit(
+                    step_episode,
+                    i,
+                    comp_text,
+                    action,
+                    episode_ids[i],
+                    env_endpoint,
+                )
+                for i, comp_text, action, obs_before in episode_data
+            ]
             for future in as_completed(futures):
                 i, completion_text, step_state, step_reward, step_done = future.result()
 
@@ -396,7 +425,11 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                     user_msg = {"role": "user", "content": step_state}
                     accumulated_messages[i].append(user_msg)
                 else:
-                    log_episode_turns(i)
+                    log_episode_turns(
+                        accumulated_messages[i],
+                        i,
+                        episode_ids[i],
+                    )
 
     # --- 6. Log win rate to WandB and stdout ---
     win_rate = wins / max(completed_games, 1)
@@ -453,7 +486,3 @@ def rollout_reward_func(completions, **kwargs):
     """Win=1, Loss/Draw=0."""
     rewards = kwargs.get("env_rewards") if kwargs else None
     return [float(r) for r in rewards] if rewards is not None else [0.0] * len(completions)
-
-
-
-
