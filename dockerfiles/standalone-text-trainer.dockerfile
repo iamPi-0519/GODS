@@ -6,20 +6,22 @@ ENV UV_SYSTEM_PYTHON=1 \
 
 # Core deps
 RUN uv pip install packaging setuptools wheel awscli pydantic \
-      mlflow huggingface_hub aiohttp requests toml fastapi \
+      "protobuf>=3.20.0,<4.0.0" \
+      "mlflow>=2.8.0,<7.0.0" \
+      huggingface_hub aiohttp requests toml fastapi \
       uvicorn httpx loguru python-dotenv scipy numpy datasets \
       tenacity minio pandas tiktoken sentencepiece peft Pillow \
       PyYAML textstat langcheck detoxify \
       git+https://github.com/rayonlabs/fiber@2.4.0 \
-      git+https://github.com/huggingface/trl@07b4a84e0a3c8f37a2508fe177615af019782946
+      git+https://github.com/huggingface/trl@40dc4bd993f699c8c36a5bc0cf31511b8866aadf
 
-RUN uv pip install --no-build-isolation vllm==0.10.2
+RUN uv pip install --no-build-isolation vllm==0.12.0
 
 WORKDIR /workspace/axolotl
 RUN mkdir -p /workspace/axolotl/configs \
     /workspace/axolotl/outputs \
     /workspace/axolotl/data \
-    /workspace/input_data 
+    /workspace/input_data
 
 COPY dockerfiles/patches/axolotl_grpo_rollout_fix.py /workspace/axolotl/src/axolotl/core/trainers/grpo/__init__.py
 COPY dockerfiles/environment_functions/ /workspace/axolotl/src
@@ -30,6 +32,7 @@ COPY scripts /workspace/scripts
 COPY core/config/base.yml /workspace/axolotl/base.yml
 COPY core/config/base_grpo.yml /workspace/axolotl/base_grpo.yml
 COPY core/config/base_environment.yml /workspace/axolotl/base_environment.yml
+COPY core/config/accelerate_config.yaml /workspace/accelerate_config.yaml
 
 RUN chmod +x /workspace/scripts/run_text_trainer.sh /workspace/scripts/text_trainer.py
 

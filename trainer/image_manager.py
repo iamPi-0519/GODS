@@ -416,6 +416,17 @@ async def run_environment_server_container(environment_name: str, log_labels: di
             network=cst.INTERNAL_BRIDGE_NAME,
         )
         return container
+    elif environment_name == "game":
+        # Run the affine game env server
+        container = await asyncio.to_thread(
+            client.containers.run,
+            image="openspiel:v1", #TODO Ensure this image is defined
+            name=container_name,
+            detach=True,
+            labels=log_labels,
+            network=cst.INTERNAL_BRIDGE_NAME,
+        )
+        return container
     else:
         return None
 

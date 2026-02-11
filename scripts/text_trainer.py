@@ -92,7 +92,7 @@ def create_config(task_id, model, dataset, dataset_type, file_format, output_dir
     if log_wandb:
         config["wandb_runid"] = f"{task_id}_{expected_repo_name}"
         config["wandb_name"] = f"{task_id}_{expected_repo_name}"
-        config["wandb_mode"] = "offline"
+        config["wandb_mode"] = "online"
         os.makedirs(train_cst.WANDB_LOGS_DIR, exist_ok=True)
     else:
         for key in list(config.keys()):
@@ -124,6 +124,12 @@ def create_config(task_id, model, dataset, dataset_type, file_format, output_dir
         elif dataset_type.environment_name == "liars_dice":
             config["trl"]["rollout_func"] = "liars_dice.rollout_first_prompt_and_completion"
             config["trl"]["reward_funcs"] = ["liars_dice.rollout_reward_func"]
+            config["trl"]["reward_weights"] = [1.0]
+        elif dataset_type.environment_name == "game":
+            config["trl"]["rollout_func"] = "affine_game.rollout_first_prompt_and_completion"
+            config["trl"]["reward_funcs"] = [
+                "affine_game.rollout_reward_func",
+            ]
             config["trl"]["reward_weights"] = [1.0]
 
     if file_format != FileFormat.HF.value:
