@@ -247,19 +247,20 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
         for _ in range(num_episodes)
     ]
     episode_ids = [None] * num_episodes
-
+    
     # --- 3. Per-Episode State Tracking ---
     current_observations = ["" for _ in range(num_episodes)]
     done_flags = [False for _ in range(num_episodes)]
     train_rewards = [0.0 for _ in range(num_episodes)]
     episode_lengths = [0 for _ in range(num_episodes)]
-
+    
     # Multi-step accumulator variables (accumulate across all turns)
     accumulated_messages = [[] for _ in range(num_episodes)]
-    initial_prompt_ids = [[] for _ in range(num_episodes)]
-    accumulated_completion_ids = [[] for _ in range(num_episodes)]
-    accumulated_logprobs = [[] for _ in range(num_episodes)]
-    accumulated_action_mask = [[] for _ in range(num_episodes)]
+    episode_prompt_ids = [[] for _ in range(num_episodes)]
+    episode_completion_ids = [[] for _ in range(num_episodes)]
+    episode_logprobs = [[] for _ in range(num_episodes)]
+    episode_action_masks = [[] for _ in range(num_episodes)]
+    prev_full_ids = [None for _ in range(num_episodes)]
 
     # Win rate tracking
     wins = 0
@@ -267,6 +268,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     completed_games = 0
 
     # --- 4. Reset All Games (Parallel) ---
+    # Execute resets in parallel
     with ThreadPoolExecutor(max_workers=min(num_episodes, MAX_PARALLEL_REQUESTS)) as executor:
         futures = [
             executor.submit(reset_episode, i, game_ids[i], env_endpoint)
@@ -278,11 +280,6 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
             current_observations[i] = observation
             accumulated_messages[i] = messages
             done_flags[i] = failed
-            if not failed and messages:
-                prompt_text = tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=False
-                )
-                initial_prompt_ids[i] = tokenizer.encode(prompt_text, add_special_tokens=False)
 
     # --- 5. Batched Turn Loop ---
     for turn in range(max_turns):
@@ -290,16 +287,14 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
         if not active_indices:
             break
 
-        # Build prompts for all active episodes (pre-rendered text)
+        # Build prompts for all active episodes
         batch_prompts = []
         for i in active_indices:
-            prompt_text = tokenizer.apply_chat_template(
-                accumulated_messages[i], add_generation_prompt=True, tokenize=False
-            )
-            batch_prompts.append(prompt_text)
+            batch_prompts.append(accumulated_messages[i])
 
         # --- BATCHED GENERATION ---
-        rollout_outputs = generate_rollout_completions(trainer, prompts=batch_prompts)
+        # Generate completions for all active episodes at once
+        rollout_outputs = generate_rollout_completions(trainer, prompts=batch_prompts, as_chat=True)
 
         # Process outputs - extract completions and parse actions
         episode_data = []
@@ -310,48 +305,50 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
             logprobs = output.get("logprobs", [])
             completion_text = tokenizer.decode(completion_ids, skip_special_tokens=True).strip()
 
-            # Check if prompt exceeds max length - end episode early
+            # Check if prompt exceeds max length - end episode early to prevent context overflow
             if len(prompt_ids) > MAX_PROMPT_LEN:
                 print(f"Warning: Prompt exceeded {MAX_PROMPT_LEN} tokens ({len(prompt_ids)}) at turn {turn} for episode {i}, ending episode early")
                 done_flags[i] = True
                 continue
 
-            # --- BPE mismatch verification ---
+            # Multi-step accumulation logic (from alfworld_legacy.py)
             if turn == 0:
-                if list(prompt_ids) != list(initial_prompt_ids[i]):
-                    num_diff = sum(a != b for a, b in zip(prompt_ids, initial_prompt_ids[i]))
-                    len_diff = len(prompt_ids) - len(initial_prompt_ids[i])
-                    print(f"[BPE-check] Turn 0, ep {i}: vLLM prompt_ids MISMATCH — "
-                          f"len {len(prompt_ids)} vs expected {len(initial_prompt_ids[i])} (delta={len_diff}), "
-                          f"{num_diff} tokens differ in overlap")
+                episode_prompt_ids[i] = prompt_ids
+                prev_full_ids[i] = prompt_ids.copy()
             else:
-                expected_len = len(initial_prompt_ids[i]) + len(accumulated_completion_ids[i])
-                actual_len = len(prompt_ids)
-                if actual_len != expected_len:
-                    print(f"[BPE-check] Turn {turn}, ep {i}: prompt_ids len {actual_len} vs "
-                          f"expected {expected_len} (drift={actual_len - expected_len})")
+                if prev_full_ids[i] is None:
+                    prev_full_ids[i] = prompt_ids.copy()
+                else:
+                    if prompt_ids[: len(prev_full_ids[i])] != prev_full_ids[i]:
+                        num_diff = sum(x != y for x, y in zip(prompt_ids[: len(prev_full_ids[i])], prev_full_ids[i]))
+                        print(f"Warning: BPE mismatch at turn {turn} for episode {i}: {num_diff} tokens differ, ratio {100 * num_diff / len(prev_full_ids[i]):.2f}%")
+                    delta_prompt_ids = prompt_ids[len(prev_full_ids[i]) :]
+                    if delta_prompt_ids:
+                        episode_completion_ids[i].extend(delta_prompt_ids)
+                        episode_logprobs[i].extend([0.0] * len(delta_prompt_ids))
+                        episode_action_masks[i].extend([0] * len(delta_prompt_ids))
+                    prev_full_ids[i] = prompt_ids.copy()
 
-            # Accumulate model's raw completion tokens with mask=1
-            action_token_ids = list(completion_ids) if not isinstance(completion_ids, list) else completion_ids
-            action_logprobs = list(logprobs) if not isinstance(logprobs, list) else logprobs
-
-            if action_token_ids:
-                accumulated_completion_ids[i].extend(action_token_ids)
-                accumulated_logprobs[i].extend(action_logprobs)
-                accumulated_action_mask[i].extend([1] * len(action_token_ids))
+            if completion_ids:
+                episode_completion_ids[i].extend(completion_ids)
+                episode_logprobs[i].extend(logprobs)
+                episode_action_masks[i].extend([1] * len(completion_ids))
+                if prev_full_ids[i] is not None:
+                    prev_full_ids[i] = prev_full_ids[i] + completion_ids
 
             # --- Parse Action ---
             action_to_send = extract_action_to_send(completion_text)
 
+            # Keep track of observation used to choose this action for optional reward shaping
             obs_before = current_observations[i]
 
+            # --- Per-turn episode logging ---
             log_turn(i, turn, obs_before, completion_text, action_to_send)
 
-            episode_data.append((i, completion_text, action_to_send, obs_before, action_token_ids))
+            episode_data.append((i, completion_text, action_to_send, obs_before))
 
         # --- Step Environments (Parallel) ---
-        episode_action_token_ids = {i: atids for i, _, _, _, atids in episode_data}
-
+        # Execute steps in parallel
         with ThreadPoolExecutor(max_workers=min(len(episode_data), MAX_PARALLEL_REQUESTS)) as executor:
             futures = [
                 executor.submit(
@@ -362,7 +359,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                     episode_ids[i],
                     env_endpoint,
                 )
-                for i, comp_text, action, obs_before, _ in episode_data
+                for i, comp_text, action, obs_before in episode_data
             ]
             for future in as_completed(futures):
                 i, completion_text, step_state, step_reward, step_done = future.result()
@@ -370,6 +367,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 current_observations[i] = step_state
                 done_flags[i] = step_done
 
+                # Track episode length for debugging/metrics.
                 episode_lengths[i] += 1
 
                 if step_done:
@@ -385,32 +383,8 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 accumulated_messages[i].append(assistant_msg)
 
                 if not step_done:
-                    # Compute observation tokens via string-level delta
-                    after_action = tokenizer.apply_chat_template(
-                        accumulated_messages[i],
-                        add_generation_prompt=False,
-                        tokenize=False
-                    )
                     user_msg = {"role": "user", "content": step_state}
                     accumulated_messages[i].append(user_msg)
-                    next_gen = tokenizer.apply_chat_template(
-                        accumulated_messages[i],
-                        add_generation_prompt=True,
-                        tokenize=False
-                    )
-                    # String delta -> tokenize -> mask=0
-                    obs_delta = next_gen[len(after_action):]
-                    obs_token_ids = tokenizer.encode(obs_delta, add_special_tokens=False)
-
-                    # EOS edge case: if model didn't generate EOS, prepend it
-                    eos_token_id = tokenizer.eos_token_id
-                    action_token_ids = episode_action_token_ids.get(i, [])
-                    if not (action_token_ids and action_token_ids[-1] == eos_token_id) and eos_token_id is not None:
-                        obs_token_ids = [eos_token_id] + obs_token_ids
-
-                    accumulated_completion_ids[i].extend(obs_token_ids)
-                    accumulated_action_mask[i].extend([0] * len(obs_token_ids))
-                    accumulated_logprobs[i].extend([0.0] * len(obs_token_ids))
                 else:
                     log_episode_turns(
                         accumulated_messages[i],
@@ -445,21 +419,21 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
 
     for i in range(num_episodes):
         # Skip episodes with empty sequences
-        if not initial_prompt_ids[i] or not accumulated_completion_ids[i]:
+        if not episode_prompt_ids[i] or not episode_completion_ids[i]:
             continue
 
         # Truncate episode if completion sequence exceeds max length
-        if len(accumulated_completion_ids[i]) > MAX_EPISODE_TOKENS:
-            print(f"Warning: Episode {i} completion exceeded {MAX_EPISODE_TOKENS} tokens ({len(accumulated_completion_ids[i])}), truncating")
-            accumulated_completion_ids[i] = accumulated_completion_ids[i][:MAX_EPISODE_TOKENS]
-            accumulated_logprobs[i] = accumulated_logprobs[i][:MAX_EPISODE_TOKENS]
-            accumulated_action_mask[i] = accumulated_action_mask[i][:MAX_EPISODE_TOKENS]
+        if len(episode_completion_ids[i]) > MAX_EPISODE_TOKENS:
+            print(f"Warning: Episode {i} completion exceeded {MAX_EPISODE_TOKENS} tokens ({len(episode_completion_ids[i])}), truncating")
+            episode_completion_ids[i] = episode_completion_ids[i][:MAX_EPISODE_TOKENS]
+            episode_logprobs[i] = episode_logprobs[i][:MAX_EPISODE_TOKENS]
+            episode_action_masks[i] = episode_action_masks[i][:MAX_EPISODE_TOKENS]
 
-        all_prompt_ids.append(initial_prompt_ids[i])
-        all_completion_ids.append(accumulated_completion_ids[i])
-        all_logprobs.append(accumulated_logprobs[i])
+        all_prompt_ids.append(episode_prompt_ids[i])
+        all_completion_ids.append(episode_completion_ids[i])
+        all_logprobs.append(episode_logprobs[i])
         all_rewards.append(train_rewards[i])
-        all_action_masks.append(accumulated_action_mask[i])
+        all_action_masks.append(episode_action_masks[i])
 
     return {
         "prompt_ids": all_prompt_ids,
