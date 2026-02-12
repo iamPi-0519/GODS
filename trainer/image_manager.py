@@ -409,7 +409,7 @@ async def run_environment_server_container(environment_name: str, log_labels: di
     if environment_name in ["goofspiel", "gin_rummy", "liars_dice"]:
         container = await asyncio.to_thread(
             client.containers.run,
-            image="openspiel:v1",
+            image="diagonalge/openspiel:latest",
             name=container_name,
             detach=True,
             labels=log_labels,
@@ -420,7 +420,7 @@ async def run_environment_server_container(environment_name: str, log_labels: di
         # Run the affine game env server
         container = await asyncio.to_thread(
             client.containers.run,
-            image="openspiel:v1", #TODO Ensure this image is defined
+            image="diagonalge/openspiel:latest", #TODO Ensure this image is defined
             name=container_name,
             detach=True,
             labels=log_labels,
