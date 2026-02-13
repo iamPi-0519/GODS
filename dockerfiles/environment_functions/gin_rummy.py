@@ -265,6 +265,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     # Win rate tracking
     wins = 0
     losses = 0
+    draws = 0
     completed_games = 0
 
     # --- 4. Reset All Games (Parallel) ---
@@ -373,10 +374,12 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 if step_done:
                     train_rewards[i] = step_reward
                     completed_games += 1
-                    if train_rewards[i] > 0:
+                    if step_reward > 0.5:
                         wins += 1
-                    else:
+                    elif step_reward < 0.5:
                         losses += 1
+                    else:
+                        draws += 1
 
                 # Update messages for next turn
                 assistant_msg = {"role": "assistant", "content": completion_text}
@@ -395,7 +398,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
     # --- 6. Log win rate to WandB and stdout ---
     win_rate = wins / max(completed_games, 1)
 
-    print(f"[Gin Rummy] Batch stats: {wins}W/{losses}L "
+    print(f"[Gin Rummy] Batch stats: {wins}W/{losses}L/{draws}D "
           f"({completed_games} games, win_rate={win_rate:.2%})")
 
     try:
@@ -405,6 +408,7 @@ def rollout_first_prompt_and_completion(prompts: list[str], trainer, max_turns: 
                 "game/win_rate": win_rate,
                 "game/wins": wins,
                 "game/losses": losses,
+                "game/draws": draws,
                 "game/completed_games": completed_games,
             }, commit=False)
     except ImportError:
